@@ -1,0 +1,99 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-mirror.taffy.edu.kg/basic_mirror/python:3.10-slim-bookworm}
+      network: host
+    image: local/realesrgan:v1.0.4-openvino
+    container_name: realesrgan-api
+    restart: unless-stopped
+    init: true
+    cpus: "3.0"
+    mem_limit: 3g
+    pids_limit: 256
+    read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    entrypoint:
+      - python
+      - -m
+      - uvicorn
+    command:
+      - app.api.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --workers
+      - "1"
+    environment:
+      HOME: /tmp
+      OPENVINO_TELEMETRY_DISABLED: "1"
+      SUPERPHOTO_SESSION_SECRET: ${SUPERPHOTO_SESSION_SECRET:?set in .env}
+      SUPERPHOTO_ADMIN_USERNAME: ${SUPERPHOTO_ADMIN_USERNAME:-admin}
+      SUPERPHOTO_ADMIN_PASSWORD: ${SUPERPHOTO_ADMIN_PASSWORD:-}
+      SUPERPHOTO_COOKIE_SECURE: ${SUPERPHOTO_COOKIE_SECURE:-true}
+      TURNSTILE_REQUIRED: ${TURNSTILE_REQUIRED:-false}
+      TURNSTILE_SITE_KEY: ${TURNSTILE_SITE_KEY:-}
+      TURNSTILE_SECRET_KEY: ${TURNSTILE_SECRET_KEY:-}
+    ports:
+      - 127.0.0.1:8000:8000
+    volumes:
+      - ./models:/models:ro
+      - ./data:/data
+      - ./state:/state
+      - ./logs:/logs
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  worker:
+    image: local/realesrgan:v1.0.4-openvino
+    container_name: realesrgan-worker
+    restart: unless-stopped
+    init: true
+    cpus: "7.0"
+    mem_limit: 13g
+    pids_limit: 512
+    shm_size: 1g
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      HOME: /tmp
+      OMP_NUM_THREADS: "3"
+      OPENBLAS_NUM_THREADS: "3"
+      MKL_NUM_THREADS: "3"
+      OPENVINO_NUM_THREADS: "4"
+      OPENVINO_TELEMETRY_DISABLED: "1"
+      REALESRGAN_MODEL_PATH: /models/RealESRGAN_x4plus.xml
+      REALESRGAN_MODEL_DIR: /models
+      REALESRGAN_ANIME_MODEL_PATH: /models/RealESRGAN_x4plus_anime_6B.xml
+      GFPGAN_MODEL_PATH: /models/GFPGANv1.3.pth
+      WORKER_CONCURRENCY: "2"
+    entrypoint:
+      - python
+      - -m
+      - app.worker.main
+    volumes:
+      - ./models:/models:ro
+      - ./data:/data
+      - ./state:/state
+      - ./logs:/logs

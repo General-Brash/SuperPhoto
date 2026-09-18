@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>SuperPhoto - AI 图片超分辨率</title>
+  <link rel="stylesheet" href="/assets/styles.css?v=1.0.4-r2">
+  <link rel="stylesheet" href="/assets/dialog-fixes.css?v=1.0.4-r2">
+  <link rel="stylesheet" href="/assets/enhancement-status.css?v=1.0.4-r2">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="#workspace" aria-label="SuperPhoto 首页"><span class="brand-mark">S</span><span class="brand-copy"><span>SuperPhoto</span><small class="brand-version">v1.0.4</small></span></a>
+      <nav class="main-nav" aria-label="主导航">
+        <button class="nav-item active" data-view="workspace"><span class="nav-icon">+</span><span>新建任务</span></button>
+        <button class="nav-item" data-view="history"><span class="nav-icon">≡</span><span>任务历史</span></button>
+        <button class="nav-item" data-view="account"><span class="nav-icon">○</span><span>账户设置</span></button>
+        <button class="nav-item admin-only hidden" data-view="admin"><span class="nav-icon">◇</span><span>管理后台</span></button>
+      </nav>
+      <div class="sidebar-foot">
+        <div class="service-indicator"><span id="healthDot" class="status-dot"></span><span id="healthText">正在连接服务</span></div>
+        <button id="authButton" class="user-button"><span class="avatar">访</span><span><strong id="userLabel">访客模式</strong><small id="quotaLabel">每日 3 张</small></span></button>
+      </div>
+    </aside>
+
+    <main class="main-content">
+      <section id="workspaceView" class="view active">
+        <header class="page-header">
+          <div><p class="eyebrow">AI 图像增强工作台</p><h1>把细节带回来</h1><p>上传图片，选择用途与目标清晰度，剩下的交给 SuperPhoto。</p></div>
+          <div class="header-actions"><span id="roleBadge" class="role-badge">访客</span><button class="button secondary" id="historyShortcut">查看队列</button></div>
+        </header>
+
+        <div class="workspace-grid">
+          <div class="canvas-column">
+            <div id="dropzone" class="dropzone" tabindex="0">
+              <input id="fileInput" type="file" accept="image/jpeg,image/png" multiple hidden>
+              <div class="drop-symbol">＋</div>
+              <h2 id="dropzoneTitle">拖入 JPG 或 PNG 图片</h2>
+              <p id="dropzoneHint">或点击选择文件，单张不超过 10 MiB</p>
+              <button class="button primary" id="chooseButton">选择图片</button>
+            </div>
+            <div id="filePanel" class="file-panel hidden">
+              <div class="section-heading"><div><h2>待处理图片</h2><p id="fileSummary">0 张图片</p></div><button class="icon-button" id="addMore" title="继续添加图片">＋</button></div>
+              <div id="fileList" class="file-list"></div>
+            </div>
+          </div>
+
+          <aside class="settings-panel">
+            <div class="settings-head"><div><p class="eyebrow">批次设置</p><h2>输出参数</h2></div><button class="text-button" id="resetSettings">重置</button></div>
+            <div class="field content-type-field"><span>内容类型</span><div class="content-type-controls"><select id="modelSelect" class="hidden"><option value="general">通用</option><option value="anime">动漫</option></select><div id="modelChoices" class="segmented" role="group" aria-label="内容类型"><button type="button" data-model="general" class="active" aria-pressed="true">通用</button><button type="button" data-model="anime" aria-pressed="false">动漫</button></div><span class="upload-type-label">上传类型</span><div id="uploadTypeChoices" class="segmented" role="group" aria-label="上传类型"><button type="button" data-upload-type="photo" class="active" aria-pressed="true">照片</button><button type="button" data-upload-type="video" aria-pressed="false">视频</button></div></div></div>
+            <div class="field"><span>目标清晰度</span><div class="segmented target-options"><button data-target="1k" data-upload="video" class="hidden">1K</button><button data-target="2k" data-upload="photo">2K</button><button class="active" data-target="4k" data-upload="all">4K</button><button data-target="6k" data-role="user" data-upload="photo" class="hidden">6K</button><button data-target="8k" data-role="advanced" data-upload="photo" class="hidden">8K</button></div></div>
+            <label class="field"><span>画面比例</span><select id="aspectSelect"><option value="original">保留原始比例</option><option value="16:9">16:9 横屏</option><option value="9:16">9:16 竖屏</option><option value="4:3">4:3</option><option value="3:4">3:4</option><option value="1:1">1:1 方图</option></select></label>
+            <input id="cropToggle" type="checkbox" class="hidden">
+            <button type="button" id="advancedToggle" class="advanced-toggle" aria-expanded="false"><span>高级设置</span><span aria-hidden="true">⌄</span></button>
+            <div id="advancedSettings" class="advanced-settings hidden">
+              <label class="toggle-row"><span><strong>人脸增强</strong><small id="faceHint">修复人像五官细节</small></span><input id="faceToggle" type="checkbox"><i></i></label>
+              <label id="tileSetting" class="field"><span>Tile 大小</span><select id="tileSelect"><option value="128">128</option><option value="256" selected>256</option><option value="512">512</option></select></label>
+            </div>
+            <div class="field"><span class="field-label">输出格式 <button class="help-button" type="button" aria-label="查看输出格式说明">?</button><span id="formatTooltip" class="format-tooltip" role="tooltip"><strong>JPEG</strong> 文件较小，适合照片，不支持透明背景。<strong>PNG</strong> 无损且支持透明背景，文件通常最大。<strong>WebP</strong> 兼顾体积与画质，并支持透明背景。</span></span><div id="formatChoices" class="segmented three"><button data-format="jpeg" data-upload="photo" class="active">JPEG</button><button data-format="png" data-upload="photo">PNG</button><button data-format="webp" data-upload="photo">WebP</button><button data-format="mp4" data-upload="video" class="hidden">MP4</button><button data-format="webm" data-upload="video" class="hidden">WebM</button></div></div>
+            <div class="settings-inline"><label class="field"><span>压缩级别</span><select id="compressionSelect"><option value="1">1</option><option value="3">3</option><option value="5" selected>5</option><option value="7">7</option><option value="9">9</option></select></label><label class="field"><span>图像质量</span><select id="qualitySelect"><option value="standard">标准</option><option value="high" selected>高质量</option><option value="maximum">最高质量</option></select></label></div>
+            <div id="turnstileBox" class="turnstile-box hidden"></div>
+            <div class="quota-note"><span id="batchLimitText">访客单批最多 2 张</span><span>目标超出原生 4 倍时将进行高质量缩放</span></div>
+            <button id="submitButton" class="button primary submit" disabled><span>开始增强</span><strong id="submitCount">0 张</strong></button>
+            <div id="uploadStatus" class="upload-status" aria-live="polite"></div>
+            <div class="submission-meta" aria-live="polite"><span>预计耗时 <strong id="estimatedTime">待添加图片</strong></span><span>预计大小 <strong id="estimatedSize">待添加图片</strong></span><span>今日剩余 <strong id="remainingQuota">计算中</strong></span></div>
+          </aside>
+        </div>
+      </section>
+
+      <section id="historyView" class="view">
+        <header class="page-header compact"><div><p class="eyebrow">处理记录</p><h1>任务历史</h1><p>查看队列、下载结果或重新处理失败任务。</p></div><button class="button primary" data-view-target="workspace">新建任务</button></header>
+        <div id="historyEmpty" class="empty-state"><h2>还没有处理记录</h2><p>创建第一个超分任务后，进度和结果会显示在这里。</p></div>
+        <div id="batchList" class="batch-list"></div>
+        <div id="historyPagination" class="history-pagination" hidden><button id="historyPrev" class="button secondary small">上一页</button><span id="historyPageLabel"></span><button id="historyNext" class="button secondary small">下一页</button></div>
+      </section>
+
+      <section id="accountView" class="view">
+        <header class="page-header compact"><div><p class="eyebrow">身份与安全</p><h1>账户设置</h1><p>管理登录状态、密码和个人数据。</p></div></header>
+        <div id="guestAccount" class="account-grid"><div class="panel"><h2>当前为访客模式</h2><p>访客任务保留 24 小时。登录或注册后，当前浏览器里的任务会自动合并到账户。</p><button class="button primary open-auth">登录或注册</button></div></div>
+        <div id="userAccount" class="account-grid hidden">
+          <div class="panel"><h2>账户信息</h2><dl class="detail-list"><div><dt>用户名</dt><dd id="accountUsername">-</dd></div><div><dt>权限</dt><dd id="accountRole">-</dd></div><div><dt>每日配额</dt><dd id="accountQuota">-</dd></div></dl><button id="logoutButton" class="button secondary">退出登录</button></div>
+          <form id="passwordForm" class="panel"><h2>修改密码</h2><label class="field"><span>当前密码</span><input name="current_password" type="password" required></label><label class="field"><span>新密码</span><input name="new_password" type="password" minlength="10" required></label><button class="button primary" type="submit">更新密码</button></form>
+          <div class="panel danger-panel"><h2>注销账户</h2><p>注销后，账户、所有任务、图片和分享链接都会永久删除。</p><button id="deleteAccountButton" class="button danger">注销账户</button></div>
+        </div>
+      </section>
+
+      <section id="adminView" class="view">
+        <header class="page-header compact"><div><p class="eyebrow">系统管理</p><h1>管理后台</h1><p>管理用户、邀请码、任务与服务状态。</p></div><button id="refreshAdmin" class="button secondary">刷新数据</button></header>
+        <div id="adminStats" class="stats-grid"></div>
+        <div class="admin-grid">
+          <div class="panel wide"><div class="section-heading"><div><h2>用户</h2><p>按分辨率设置每日图片/视频配额，填 0 即隐藏并禁止使用</p></div><button class="button secondary small" data-admin-clear="audit-log">清理审计日志</button></div><div class="table-wrap"><table><thead><tr><th>用户</th><th>角色</th><th>图片配额（2K / 4K / 6K / 8K）</th><th>视频配额（1K / 2K / 4K）</th><th>活跃</th><th>状态</th><th></th></tr></thead><tbody id="userTable"></tbody></table></div></div>
+          <div class="panel"><div class="section-heading"><div><h2>邀请码</h2><p>单次使用，可随时撤销</p></div><div><button id="createInvite" class="button primary small">生成</button><button class="button secondary small" data-admin-clear="invites">清理日志</button></div></div><div id="inviteResult" class="invite-result hidden"></div><div id="inviteList" class="invite-list"></div></div>
+          <div class="panel wide"><div class="section-heading"><div><h2>最近任务</h2><p>仅安全取消仍在排队的任务</p></div><button class="button secondary small" data-admin-clear="jobs">清理已完成记录</button></div><div class="table-wrap"><table><thead><tr><th>文件</th><th>用户</th><th>状态</th><th>模型</th><th>创建时间</th><th></th></tr></thead><tbody id="jobTable"></tbody></table></div><div id="adminJobPagination" class="history-pagination" hidden><button id="adminJobPrev" class="button secondary small">上一页</button><span id="adminJobPageLabel"></span><button id="adminJobNext" class="button secondary small">下一页</button></div></div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="authDialog" class="modal auth-modal">
+    <button class="modal-close" data-close="authDialog" aria-label="关闭">×</button>
+    <div class="auth-copy"><span class="brand-mark">S</span><p class="eyebrow">SuperPhoto 账户</p><h2>保存更久，处理更多</h2><p>注册用户每天可处理 30 张图片，历史记录保留 7 天。</p></div>
+    <div class="auth-forms">
+      <div class="tabs"><button class="active" data-auth-tab="login">登录</button><button data-auth-tab="register">邀请码注册</button></div>
+      <form id="loginForm"><label class="field"><span>用户名</span><input name="username" autocomplete="username" required></label><label class="field"><span>密码</span><input name="password" type="password" autocomplete="current-password" required></label><button class="button primary" type="submit">登录</button></form>
+      <form id="registerForm" class="hidden"><label class="field"><span>用户名</span><input name="username" pattern="[A-Za-z0-9_]{3,24}" required></label><label class="field"><span>密码</span><input name="password" type="password" minlength="10" required></label><label class="field"><span>邀请码</span><input name="invite_code" required></label><button class="button primary" type="submit">创建账户</button></form>
+    </div>
+  </dialog>
+
+  <dialog id="compareDialog" class="modal compare-modal">
+    <div class="compare-head"><div><p class="eyebrow">处理结果</p><h2 id="compareTitle">图片对比</h2></div><div><a id="compareDownload" class="button primary" href="#">下载结果</a><button class="modal-close static" data-close="compareDialog" aria-label="关闭">×</button></div></div>
+    <div id="compareStage" class="compare-stage"><img id="compareOriginal" alt="原图"><div id="compareResultWrap"><img id="compareResult" alt="超分结果"></div><input id="compareSlider" type="range" min="0" max="100" value="50" aria-label="对比位置"><span class="before-label">原图</span><span class="after-label">增强后</span></div>
+  </dialog>
+
+  <div id="toastRegion" class="toast-region" aria-live="polite"></div>
+  <script src="/assets/app.js?v=1.0.4-r2" defer></script>
+</body>
+</html>

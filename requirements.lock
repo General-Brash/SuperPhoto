@@ -1,0 +1,21 @@
+# Runtime pins for the CPU baseline. BasicSR is installed separately with
+# --no-deps so it cannot pull the GUI-enabled opencv-python package.
+torch==2.1.2+cpu
+torchvision==0.16.2+cpu
+numpy==1.26.4
+opencv-python-headless==4.10.0.84
+Pillow==10.4.0
+tqdm==4.66.5
+openvino==2024.6.0
+addict==2.4.0
+future==1.0.0
+lmdb==1.4.1
+PyYAML==6.0.2
+requests==2.32.3
+scikit-image==0.24.0
+scipy==1.11.4
+tensorboard==2.15.2
+yapf==0.40.2
+fastapi==0.115.6
+uvicorn==0.34.0
+python-multipart==0.0.20

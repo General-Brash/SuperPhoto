@@ -1,0 +1,10 @@
+.git
+.github
+.vscode
+__pycache__
+*.pyc
+models/*
+data/*
+logs/*
+tmp/*
+results/*

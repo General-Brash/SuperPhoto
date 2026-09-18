@@ -1,0 +1,7 @@
+dialog:not([open]) {
+  display: none;
+}
+
+.auth-modal[open] {
+  display: grid;
+}
