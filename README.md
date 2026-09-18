@@ -18,6 +18,12 @@
 
 </div>
 
+## SuperPhoto project
+
+SuperPhoto is developed on top of the open-source [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN) models. I am primarily responsible for the Web platform, task system, OpenVINO inference integration, permissions and quotas, container deployment, and operations and maintenance.
+
+The Real-ESRGAN models, algorithms, and upstream documentation remain credited to their original authors and upstream project. This repository adds the SuperPhoto-specific platform, task, inference-adaptation, deployment, and operations code.
+
 🔥 **AnimeVideo-v3 model (动漫视频小模型)**. Please see [[*anime video models*](docs/anime_video_model.md)] and [[*comparisons*](docs/anime_comparisons.md)]<br>
 🔥 **RealESRGAN_x4plus_anime_6B** for anime images **(动漫插图模型)**. Please see [[*anime_model*](docs/anime_model.md)]
 

@@ -12,6 +12,12 @@
 [![python lint](https://github.com/xinntao/Real-ESRGAN/actions/workflows/pylint.yml/badge.svg)](https://github.com/xinntao/Real-ESRGAN/blob/master/.github/workflows/pylint.yml)
 [![Publish-pip](https://github.com/xinntao/Real-ESRGAN/actions/workflows/publish-pip.yml/badge.svg)](https://github.com/xinntao/Real-ESRGAN/blob/master/.github/workflows/publish-pip.yml)
 
+## SuperPhoto 项目说明
+
+SuperPhoto 基于 [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN) 开源模型开发；本人主要负责 Web 平台、任务系统、OpenVINO 推理适配、权限与配额、容器部署及运维。
+
+仓库中的 Real-ESRGAN 模型、算法与上游文档归其原作者及上游项目所有；本项目新增的平台、任务、推理适配、部署与运维相关代码属于 SuperPhoto。
+
 :fire: 更新动漫视频的小模型 **RealESRGAN AnimeVideo-v3**. 更多信息在 [[动漫视频模型介绍](docs/anime_video_model.md)] 和 [[比较](docs/anime_comparisons_CN.md)] 中.
 
 1. Real-ESRGAN的[Colab Demo](https://colab.research.google.com/drive/1k2Zod6kSHEvraybHl50Lys0LerhyTMCo?usp=sharing) | Real-ESRGAN**动漫视频** 的[Colab Demo](https://colab.research.google.com/drive/1yNl9ORUxxlL4N0keJa2SEPB61imPQd1B?usp=sharing)

@@ -138,3 +138,10 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# Runtime state, logs, and user-generated media
+/state/
+/logs/
+/data/input/
+/data/output/
+/data/tmp/
