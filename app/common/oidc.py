@@ -4,11 +4,8 @@ This module is intentionally decoupled from ``app.common.config``: every value i
 needs is supplied through :class:`OIDCConfig` so it can be unit tested without any
 application state or network access.
 
-Runtime constraint: the deployment image (requirements.lock) ships neither
-``cryptography`` nor ``PyJWT``/``python-jose``. Only the standard library and
-``requests`` are guaranteed. Therefore all HTTP calls use ``urllib.request`` and
-id_token signature verification is treated as *soft-optional*
-(see :func:`verify_signature_if_possible`).
+The deployment image pins PyJWT and cryptography. ID Tokens must pass RS256
+JWKS signature and claim checks before any identity is accepted.
 """
 
 import base64
@@ -69,21 +66,39 @@ def _request_json(request, timeout):
     except (OSError, ValueError) as error:
         raise OIDCError('OIDC request failed: {}'.format(error)) from error
     try:
-        return json.loads(payload)
+        document = json.loads(payload)
     except (ValueError, TypeError) as error:
         raise OIDCError('OIDC endpoint returned invalid JSON') from error
+    if not isinstance(document, dict):
+        raise OIDCError('OIDC endpoint returned invalid JSON object')
+    return document
+
+
+def validate_discovery(config, document):
+    """Never trust an issuer asserted solely by provider-supplied metadata."""
+    if not isinstance(document, dict):
+        raise OIDCError('OIDC discovery returned an invalid document')
+    if not config.issuer or document.get('issuer') != config.issuer:
+        raise OIDCError('OIDC discovery issuer mismatch')
+    for field in ('authorization_endpoint', 'token_endpoint', 'jwks_uri', 'userinfo_endpoint'):
+        url = document.get(field)
+        if not isinstance(url, str) or urllib.parse.urlparse(url).scheme != 'https':
+            raise OIDCError('OIDC discovery missing secure ' + field)
+    return document
 
 
 def discover(config, *, timeout=5.0):
     """Fetch (and process-cache with a TTL) the OIDC discovery document."""
     url = discovery_url_for(config)
+    if urllib.parse.urlparse(url).scheme != 'https':
+        raise OIDCError('OIDC discovery must use HTTPS')
     now = time.monotonic()
     cached = _DISCOVERY_CACHE.get(url)
     if cached and cached[0] > now:
-        return cached[1]
+        return validate_discovery(config, cached[1])
     request = urllib.request.Request(url, method='GET')
     request.add_header('Accept', 'application/json')
-    document = _request_json(request, timeout)
+    document = validate_discovery(config, _request_json(request, timeout))
     _DISCOVERY_CACHE[url] = (now + DISCOVERY_TTL_SECONDS, document)
     return document
 
@@ -177,60 +192,56 @@ def validate_id_token(config, claims, *, nonce, issuer, now=None):
     Raises OIDCError on any mismatch. ``now`` may be supplied for deterministic tests.
     """
     now = time.time() if now is None else now
-    if claims.get('iss') != issuer:
+    if not isinstance(claims, dict):
+        raise OIDCError('invalid ID Token claims')
+    if not config.issuer or issuer != config.issuer or claims.get('iss') != config.issuer:
         raise OIDCError('id_token issuer mismatch')
     audience = claims.get('aud')
     audiences = audience if isinstance(audience, list) else [audience]
     if config.client_id not in audiences:
         raise OIDCError('id_token audience mismatch')
     exp = claims.get('exp')
-    if not isinstance(exp, (int, float)) or now > exp + 60:
+    if isinstance(exp, bool) or not isinstance(exp, (int, float)) or now > exp + 60:
         raise OIDCError('id_token expired')
     if claims.get('nonce') != nonce:
         raise OIDCError('id_token nonce mismatch')
 
 
 def _load_jwt_library():
-    """Return the PyJWT module if importable, otherwise None (kept small for tests)."""
     try:
         import jwt
-    except ImportError:
-        return None
+    except ImportError as error:
+        raise OIDCError('OIDC signature verification is unavailable') from error
     return jwt
 
 
-def verify_signature_if_possible(discovery, token, *, timeout=5.0):
-    """Best-effort RS256 signature check against the discovery ``jwks_uri``.
+def verify_signature_if_possible(discovery, token, *, config, timeout=5.0):
+    """Require RS256 JWKS verification; return authenticated claims or fail closed.
 
-    Returns ``True``/``False`` when a crypto library (PyJWT) is available and the
-    verification runs, or ``None`` when no such library is installed, signalling that
-    local signature verification was skipped.
-
-    Security note: in the Authorization Code flow the id_token is obtained directly
-    from the token endpoint over a server-to-server TLS connection. OIDC Core
-    section 3.1.3.7 permits relying on that TLS-protected direct fetch in place of
-    local signature verification. When PyJWT/cryptography are absent (as in the
-    pinned runtime image), trust therefore rests on TLS + the direct token exchange,
-    complemented by the userinfo endpoint call, rather than on a local JWS check.
+    The historical name is retained for callers, but verification is never optional.
     """
-    jwt = _load_jwt_library()
-    if jwt is None:
-        return None
     jwks_uri = discovery.get('jwks_uri')
-    if not jwks_uri:
-        return False
+    if not isinstance(jwks_uri, str) or urllib.parse.urlparse(jwks_uri).scheme != 'https':
+        raise OIDCError('OIDC signing keys unavailable')
+    try:
+        jwt = _load_jwt_library()
+    except ImportError as error:
+        raise OIDCError('OIDC signature verification is unavailable') from error
     try:
         client = jwt.PyJWKClient(jwks_uri, timeout=timeout)
         signing_key = client.get_signing_key_from_jwt(token)
-        jwt.decode(
-            token,
-            signing_key.key,
-            algorithms=['RS256'],
-            options={'verify_aud': False, 'verify_exp': False},
+        claims = jwt.decode(
+            token, signing_key.key, algorithms=['RS256'],
+            audience=config.client_id, issuer=config.issuer,
+            options={'require': ['iss', 'sub', 'aud', 'exp']}, leeway=60,
         )
-        return True
-    except Exception:
-        return False
+        if not isinstance(claims, dict):
+            raise OIDCError('invalid ID Token claims')
+        return claims
+    except OIDCError:
+        raise
+    except Exception as error:
+        raise OIDCError('OIDC ID Token signature or claims invalid') from error
 
 
 def fetch_userinfo(config, discovery, *, access_token, timeout=5.0):

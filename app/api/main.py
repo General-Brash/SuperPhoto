@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import secrets
 import shutil
 import sqlite3
 import threading
@@ -741,7 +742,11 @@ def _read_oidc_flow(cookie_value):
         return None
     try:
         padding = '=' * (-len(raw) % 4)
-        return json.loads(base64.urlsafe_b64decode(raw + padding))
+        flow = json.loads(base64.urlsafe_b64decode(raw + padding))
+        if not isinstance(flow, dict) or any(not isinstance(flow.get(key), str) or not flow[key]
+                                             for key in ('state', 'nonce', 'verifier')):
+            return None
+        return flow
     except (ValueError, TypeError):
         return None
 
@@ -775,7 +780,7 @@ def oidc_login(request: Request, response: Response):
     if not OIDC_ENABLED:
         raise HTTPException(404, 'OIDC login is not enabled')
     try:
-        discovery = oidc_lib.discover(OIDC_CONFIG)
+        discovery = oidc_lib.validate_discovery(OIDC_CONFIG, oidc_lib.discover(OIDC_CONFIG))
     except oidc_lib.OIDCError:
         return _oidc_error_redirect('无法连接身份提供方')
     verifier, challenge = oidc_lib.generate_pkce()
@@ -805,26 +810,26 @@ def oidc_callback(request: Request, response: Response, code: str = '', state: s
     if not OIDC_ENABLED:
         raise HTTPException(404, 'OIDC login is not enabled')
     if error:
-        return _oidc_error_redirect(error)
+        return _oidc_error_redirect('身份提供方拒绝了登录，请重试')
     flow = _read_oidc_flow(request.cookies.get(OIDC_FLOW_COOKIE))
     if not flow or not code or not state or not hmac.compare_digest(state, flow.get('state', '')):
         return _oidc_error_redirect('登录状态校验失败，请重试')
     try:
-        discovery = oidc_lib.discover(OIDC_CONFIG)
+        discovery = oidc_lib.validate_discovery(OIDC_CONFIG, oidc_lib.discover(OIDC_CONFIG))
         tokens = oidc_lib.exchange_code(OIDC_CONFIG, discovery, code=code, code_verifier=flow['verifier'])
         id_token = tokens.get('id_token')
-        if not id_token:
-            return _oidc_error_redirect('身份提供方未返回 id_token')
-        _header, claims = oidc_lib.decode_jwt_unverified(id_token)
-        issuer = discovery.get('issuer') or OIDC_ISSUER
+        access_token = tokens.get('access_token')
+        if not isinstance(id_token, str) or not id_token or not isinstance(access_token, str) or not access_token:
+            raise oidc_lib.OIDCError('OIDC token response incomplete')
+        claims = oidc_lib.verify_signature_if_possible(discovery, id_token, config=OIDC_CONFIG)
+        issuer = OIDC_CONFIG.issuer
         oidc_lib.validate_id_token(OIDC_CONFIG, claims, nonce=flow['nonce'], issuer=issuer)
-        oidc_lib.verify_signature_if_possible(discovery, id_token)
-        userinfo = oidc_lib.fetch_userinfo(OIDC_CONFIG, discovery, access_token=tokens.get('access_token', ''))
+        userinfo = oidc_lib.fetch_userinfo(OIDC_CONFIG, discovery, access_token=access_token)
+        sub = claims.get('sub')
+        if not isinstance(sub, str) or not sub or userinfo.get('sub') != sub:
+            raise oidc_lib.OIDCError('OIDC subject mismatch')
     except oidc_lib.OIDCError:
         return _oidc_error_redirect('身份提供方交互失败，请重试')
-    sub = userinfo.get('sub') or claims.get('sub')
-    if not sub:
-        return _oidc_error_redirect('身份提供方未返回用户标识')
 
     connection = connect()
     try:
@@ -1595,9 +1600,19 @@ def admin_update_user(user_id: str, payload: UserUpdatePayload, request: Request
                 raise HTTPException(400, f'Invalid {field}')
             return json.dumps({key: int(current.get(key, 0)) for key in defaults}, separators=(',', ':'))
         updates['image_quotas'] = normalize_quotas(payload.image_quotas, DEFAULT_IMAGE_QUOTAS, 'image_quotas')
+        changed = (
+            role != row['role'] or daily != row['daily_quota'] or active != row['active_quota']
+            or disabled != row['disabled']
+            or updates['image_quotas'] != normalize_quotas(None, DEFAULT_IMAGE_QUOTAS, 'image_quotas')
+        )
+        if not changed:
+            return {'status': 'updated'}
         assignments = ', '.join(f'{key}=?' for key in updates)
         connection.execute(f'UPDATE users SET {assignments} WHERE id=?', (*updates.values(), user_id))
-        if disabled:
+        if user_id == session['user_id']:
+            # Keep the acting administrator's current session usable, but revoke all others.
+            connection.execute('DELETE FROM sessions WHERE user_id=? AND id!=?', (user_id, session['id']))
+        else:
             connection.execute('DELETE FROM sessions WHERE user_id=?', (user_id,))
     return {'status': 'updated'}
 

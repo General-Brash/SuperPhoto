@@ -6,7 +6,7 @@
 
 <div align="center">
 
-👀[**Demos**](#-demos-videos) **|** 🚩[**Updates**](#-updates) **|** ⚡[**Usage**](#-quick-inference) **|** 🏰[**Model Zoo**](docs/model_zoo.md) **|** 🔧[Install](#-dependencies-and-installation)  **|** 💻[Train](docs/Training.md) **|** ❓[FAQ](docs/FAQ.md) **|** 🎨[Contribution](docs/CONTRIBUTING.md)
+👀[**Demos**](#-demos-videos) **|** 🚩[**Updates**](#-updates) **|** ⚡[**Usage**](#-quick-inference) **|** 🏰[**Model Zoo**](https://github.com/xinntao/Real-ESRGAN/blob/master/docs/model_zoo.md) **|** 🔧[Install](#-dependencies-and-installation)  **|** 💻[Train](https://github.com/xinntao/Real-ESRGAN/blob/master/docs/Training.md) **|** ❓[FAQ](https://github.com/xinntao/Real-ESRGAN/blob/master/docs/FAQ.md) **|** 🎨[Contribution](https://github.com/xinntao/Real-ESRGAN/blob/master/docs/CONTRIBUTING.md)
 
 [![download](https://img.shields.io/github/downloads/xinntao/Real-ESRGAN/total.svg)](https://github.com/xinntao/Real-ESRGAN/releases)
 [![PyPI](https://img.shields.io/pypi/v/realesrgan)](https://pypi.org/project/realesrgan/)
@@ -24,8 +24,8 @@ SuperPhoto is developed on top of the open-source [Real-ESRGAN](https://github.c
 
 The Real-ESRGAN models, algorithms, and upstream documentation remain credited to their original authors and upstream project. This repository adds the SuperPhoto-specific platform, task, inference-adaptation, deployment, and operations code.
 
-🔥 **AnimeVideo-v3 model (动漫视频小模型)**. Please see [[*anime video models*](docs/anime_video_model.md)] and [[*comparisons*](docs/anime_comparisons.md)]<br>
-🔥 **RealESRGAN_x4plus_anime_6B** for anime images **(动漫插图模型)**. Please see [[*anime_model*](docs/anime_model.md)]
+🔥 **AnimeVideo-v3 model (动漫视频小模型)**. Please see [[*anime video models*](https://github.com/xinntao/Real-ESRGAN/blob/master/docs/anime_video_model.md)] and [[*comparisons*](https://github.com/xinntao/Real-ESRGAN/blob/master/docs/anime_comparisons.md)]<br>
+🔥 **RealESRGAN_x4plus_anime_6B** for anime images **(动漫插图模型)**. Please see [[*anime_model*](https://github.com/xinntao/Real-ESRGAN/blob/master/docs/anime_model.md)]
 
 <!-- 1. You can try in our website: [ARC Demo](https://arc.tencent.com/en/ai-demos/imgRestore) (now only support RealESRGAN_x4plus_anime_6B) -->
 1. :boom: **Update** online Replicate demo: [![Replicate](https://img.shields.io/static/v1?label=Demo&message=Replicate&color=blue)](https://replicate.com/xinntao/realesrgan)
@@ -36,7 +36,7 @@ The Real-ESRGAN models, algorithms, and upstream documentation remain credited t
 Real-ESRGAN aims at developing **Practical Algorithms for General Image/Video Restoration**.<br>
 We extend the powerful ESRGAN to a practical restoration application (namely, Real-ESRGAN), which is trained with pure synthetic data.
 
-🌌 Thanks for your valuable feedbacks/suggestions. All the feedbacks are updated in [feedback.md](docs/feedback.md).
+🌌 Thanks for your valuable feedbacks/suggestions. All the feedbacks are updated in [feedback.md](https://github.com/xinntao/Real-ESRGAN/blob/master/docs/feedback.md).
 
 ---
 
@@ -66,16 +66,16 @@ Other recommended projects:<br>
 ## 🚩 Updates
 
 - ✅ Add the **realesr-general-x4v3** model - a tiny small model for general scenes. It also supports the **--dn** option to balance the noise (avoiding over-smooth results). **--dn** is short for denoising strength.
-- ✅ Update the **RealESRGAN AnimeVideo-v3** model. Please see [anime video models](docs/anime_video_model.md) and [comparisons](docs/anime_comparisons.md) for more details.
-- ✅ Add small models for anime videos. More details are in [anime video models](docs/anime_video_model.md).
+- ✅ Update the **RealESRGAN AnimeVideo-v3** model. Please see [anime video models](https://github.com/xinntao/Real-ESRGAN/blob/master/docs/anime_video_model.md) and [comparisons](https://github.com/xinntao/Real-ESRGAN/blob/master/docs/anime_comparisons.md) for more details.
+- ✅ Add small models for anime videos. More details are in [anime video models](https://github.com/xinntao/Real-ESRGAN/blob/master/docs/anime_video_model.md).
 - ✅ Add the ncnn implementation [Real-ESRGAN-ncnn-vulkan](https://github.com/xinntao/Real-ESRGAN-ncnn-vulkan).
-- ✅ Add [*RealESRGAN_x4plus_anime_6B.pth*](https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth), which is optimized for **anime** images with much smaller model size. More details and comparisons with [waifu2x](https://github.com/nihui/waifu2x-ncnn-vulkan) are in [**anime_model.md**](docs/anime_model.md)
-- ✅ Support finetuning on your own data or paired data (*i.e.*, finetuning ESRGAN). See [here](docs/Training.md#Finetune-Real-ESRGAN-on-your-own-dataset)
+- ✅ Add [*RealESRGAN_x4plus_anime_6B.pth*](https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth), which is optimized for **anime** images with much smaller model size. More details and comparisons with [waifu2x](https://github.com/nihui/waifu2x-ncnn-vulkan) are in [**anime_model.md**](https://github.com/xinntao/Real-ESRGAN/blob/master/docs/anime_model.md)
+- ✅ Support finetuning on your own data or paired data (*i.e.*, finetuning ESRGAN). See [here](https://github.com/xinntao/Real-ESRGAN/blob/master/docs/Training.md#Finetune-Real-ESRGAN-on-your-own-dataset)
 - ✅ Integrate [GFPGAN](https://github.com/TencentARC/GFPGAN) to support **face enhancement**.
 - ✅ Integrated to [Huggingface Spaces](https://huggingface.co/spaces) with [Gradio](https://github.com/gradio-app/gradio). See [Gradio Web Demo](https://huggingface.co/spaces/akhaliq/Real-ESRGAN). Thanks [@AK391](https://github.com/AK391)
 - ✅ Support arbitrary scale with `--outscale` (It actually further resizes outputs with `LANCZOS4`). Add *RealESRGAN_x2plus.pth* model.
 - ✅ [The inference code](inference_realesrgan.py) supports: 1) **tile** options; 2) images with **alpha channel**; 3) **gray** images; 4) **16-bit** images.
-- ✅ The training codes have been released. A detailed guide can be found in [Training.md](docs/Training.md).
+- ✅ The training codes have been released. A detailed guide can be found in [Training.md](https://github.com/xinntao/Real-ESRGAN/blob/master/docs/Training.md).
 
 ---
 
@@ -223,7 +223,7 @@ Results are in the `results` folder
 </p>
 
 Pre-trained models: [RealESRGAN_x4plus_anime_6B](https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth)<br>
- More details and comparisons with [waifu2x](https://github.com/nihui/waifu2x-ncnn-vulkan) are in [**anime_model.md**](docs/anime_model.md)
+ More details and comparisons with [waifu2x](https://github.com/nihui/waifu2x-ncnn-vulkan) are in [**anime_model.md**](https://github.com/xinntao/Real-ESRGAN/blob/master/docs/anime_model.md)
 
 ```bash
 # download model

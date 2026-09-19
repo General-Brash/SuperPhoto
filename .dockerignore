@@ -8,3 +8,10 @@ data/*
 logs/*
 tmp/*
 results/*
+# Runtime secrets, user media and live SQLite files must never enter COPY . layers.
+/state/
+/logs/
+/data/
+/.env
+/.env.*
+!/.env.example

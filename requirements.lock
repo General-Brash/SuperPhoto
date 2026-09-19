@@ -19,3 +19,5 @@ yapf==0.40.2
 fastapi==0.115.6
 uvicorn==0.34.0
 python-multipart==0.0.20
+PyJWT==2.10.1
+cryptography==45.0.7

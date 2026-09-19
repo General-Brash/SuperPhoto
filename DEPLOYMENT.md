@@ -41,7 +41,36 @@ TURNSTILE_SITE_KEY=...
 TURNSTILE_SECRET_KEY=...
 ```
 
-After changing `.env`, recreate the API container.
+OIDC (Sub2) is **deferred and disabled by default**. Do not enable it merely by
+filling example values. After Sub2 exposes a verified OIDC provider, register a
+confidential client with its exact HTTPS callback URL (`/api/auth/oidc/callback`),
+confirm issuer/discovery metadata, scopes and claim mapping, and provision the
+client secret in the host-only `.env` (never in the image or Git):
+
+```text
+OIDC_ENABLED=false
+OIDC_ISSUER=https://your-verified-issuer.example
+OIDC_DISCOVERY_URL=  # optional when issuer has standard discovery
+OIDC_CLIENT_ID=...
+OIDC_CLIENT_SECRET=...
+OIDC_REDIRECT_URI=https://your-public-site.example/api/auth/oidc/callback
+OIDC_SCOPES=openid profile
+```
+
+The API requires client ID, secret, redirect URI, and issuer even when
+`OIDC_ENABLED=true`; incomplete settings keep login disabled.
+`OIDC_DISCOVERY_URL` is optional when the issuer uses standard discovery. The image
+pins `PyJWT==2.10.1` and `cryptography==45.0.7` in `requirements.lock`. ID-token
+RS256/JWKS signature and claim verification is mandatory and fail-closed: missing
+verification dependencies, unavailable signing keys, or any issuer, audience,
+nonce, expiry, or signature mismatch must reject the OIDC login. Sub2 source,
+migrations, provider activation, and production callback testing are not part of
+this deployment document.
+
+After changing `.env`, recreate the API container (for example,
+`docker compose up -d --force-recreate api`). `.dockerignore` excludes `.env`,
+`state/`, `logs/`, and `data/` from `COPY .`; bind-mounted runtime files stay on
+the host and must be protected and backed up separately.
 
 ## Commands
 
@@ -64,7 +93,7 @@ curl https://superphoto.taffy.edu.kg/api/health
 
 - Static JPEG and PNG input only
 - 10 MiB per file
-- Guest: 2 files per batch, 5 files per UTC day, 2 active jobs
+- Guest: 2 files per batch, 3 files per UTC day, 2 active jobs
 - Registered user: 10 files per batch, 30 files per UTC day, 10 active jobs
 - Global active queue: 50 jobs
 - Maximum input side: 4096 pixels

@@ -76,10 +76,12 @@ def test_callback_creates_user_and_session(oidc_client, monkeypatch):
 
     monkeypatch.setattr(main.oidc_lib, 'exchange_code',
                         lambda *a, **k: {'id_token': 'x.y.z', 'access_token': 'at'})
-    monkeypatch.setattr(main.oidc_lib, 'decode_jwt_unverified',
-                        lambda token: ({}, {'sub': 'sub-123'}))
+    claims = {
+        'iss': 'https://auth.taffy.edu.kg', 'aud': 'superphoto',
+        'sub': 'sub-123', 'exp': 4102444800, 'nonce': 'flow-nonce',
+    }
+    monkeypatch.setattr(main.oidc_lib, 'verify_signature_if_possible', lambda *a, **k: claims)
     monkeypatch.setattr(main.oidc_lib, 'validate_id_token', lambda *a, **k: None)
-    monkeypatch.setattr(main.oidc_lib, 'verify_signature_if_possible', lambda *a, **k: None)
     monkeypatch.setattr(main.oidc_lib, 'fetch_userinfo',
                         lambda *a, **k: {'sub': 'sub-123', 'preferred_username': 'alice'})
 
@@ -104,3 +106,39 @@ def test_callback_rejects_bad_state(oidc_client):
     resp = client.get('/api/auth/oidc/callback?code=abc&state=wrong-state')
     assert resp.status_code == 303
     assert 'oidc_error' in resp.headers['location']
+
+
+def test_callback_rejects_userinfo_subject_mismatch(oidc_client, monkeypatch):
+    main, client = oidc_client
+    login = client.get('/api/auth/oidc/login')
+    state = urllib.parse.parse_qs(urllib.parse.urlparse(login.headers['location']).query)['state'][0]
+    monkeypatch.setattr(main.oidc_lib, 'exchange_code', lambda *a, **k: {'id_token': 'signed', 'access_token': 'at'})
+    monkeypatch.setattr(main.oidc_lib, 'verify_signature_if_possible', lambda *a, **k: {'sub': 'id-sub'})
+    monkeypatch.setattr(main.oidc_lib, 'validate_id_token', lambda *a, **k: None)
+    monkeypatch.setattr(main.oidc_lib, 'fetch_userinfo', lambda *a, **k: {'sub': 'other-sub'})
+    resp = client.get(f'/api/auth/oidc/callback?code=abc&state={state}')
+    assert resp.status_code == 303
+    assert 'oidc_error' in resp.headers['location']
+
+
+def test_oidc_unique_username_handles_blank_and_collision(oidc_client):
+    main, _client = oidc_client
+    from app.common.db import connect
+    with connect() as connection:
+        first = main._oidc_unique_username(connection, {'preferred_username': '!!!'})
+        assert first.startswith('sub2_')
+        connection.execute(
+            "INSERT INTO users(id, username, password_hash, role, daily_quota, active_quota, created_at, updated_at) "
+            "VALUES (?, ?, ?, 'user', 30, 10, ?, ?)",
+            ('collision', 'alice', 'hash', '2026-01-01', '2026-01-01'),
+        )
+        second = main._oidc_unique_username(connection, {'preferred_username': 'alice'})
+        assert second != 'alice'
+        assert len(second) <= 24
+
+
+def test_oidc_routes_are_disabled_when_flag_is_false(oidc_client, monkeypatch):
+    main, client = oidc_client
+    monkeypatch.setattr(main, 'OIDC_ENABLED', False)
+    assert client.get('/api/auth/oidc/login').status_code == 404
+    assert client.get('/api/auth/oidc/callback').status_code == 404

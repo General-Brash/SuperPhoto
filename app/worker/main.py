@@ -27,6 +27,10 @@ LEASE_SECONDS = 60
 HEARTBEAT_SECONDS = 15
 
 
+class JobLeaseLost(Exception):
+    """The job was cancelled, reclaimed, or its lease could not be renewed."""
+
+
 def lease_deadline():
     return (datetime.now(timezone.utc) + timedelta(seconds=LEASE_SECONDS)).isoformat()
 
@@ -93,9 +97,16 @@ def update_progress(job_id, lease_owner, progress):
         return cursor.rowcount == 1
 
 
-def heartbeat_loop(stop_event, job_id, lease_owner):
+def heartbeat_loop(stop_event, lost_event, job_id, lease_owner):
     while not stop_event.wait(HEARTBEAT_SECONDS):
-        if not renew_lease(job_id, lease_owner):
+        try:
+            renewed = renew_lease(job_id, lease_owner)
+        except Exception:
+            # If SQLite cannot confirm ownership, abandon work instead of publishing it.
+            lost_event.set()
+            return
+        if not renewed:
+            lost_event.set()
             return
 
 
@@ -175,12 +186,14 @@ def encode_output(path, image, output_format, quality, compression_level=5):
         raise RuntimeError('Failed to encode output image')
 
 
-def process_job(upsampler, face_enhancer, job, lease_owner):
+def process_job(upsampler, face_enhancer, job, lease_owner, lost_event):
     started_clock = time.perf_counter()
     metrics = {'decode_ms': 0, 'sr_ms': 0, 'resize_ms': 0, 'face_ms': 0, 'encode_ms': 0, 'verify_ms': 0}
     input_path = INPUT_DIR / job['input_path']
     output_path = OUTPUT_DIR / job['output_path']
     if output_path.is_file() and valid_output(output_path, job):
+        if lost_event.is_set():
+            raise JobLeaseLost()
         return None, None
 
     stage_started = time.perf_counter()
@@ -195,17 +208,21 @@ def process_job(upsampler, face_enhancer, job, lease_owner):
     completed_tiles = 0
     last_progress = 4
 
+    def check_progress(progress):
+        if lost_event.is_set() or not update_progress(job['id'], lease_owner, progress):
+            raise JobLeaseLost()
+
     def report_tile_progress(_tile_index, total_tiles):
         nonlocal completed_tiles, last_progress
+        if lost_event.is_set():
+            raise JobLeaseLost()
         completed_tiles += 1
         progress = int(5 + 80 * completed_tiles / (total_tiles * tile_passes))
         if progress > last_progress:
-            if not update_progress(job['id'], lease_owner, progress):
-                raise RuntimeError('Image job was cancelled')
+            check_progress(progress)
             last_progress = progress
 
-    if not update_progress(job['id'], lease_owner, 5):
-        raise RuntimeError('Image job was cancelled')
+    check_progress(5)
     upsampler.progress_callback = report_tile_progress
     stage_started = time.perf_counter()
     try:
@@ -213,6 +230,8 @@ def process_job(upsampler, face_enhancer, job, lease_owner):
     finally:
         upsampler.progress_callback = None
     metrics['sr_ms'] = (time.perf_counter() - stage_started) * 1000
+    if lost_event.is_set():
+        raise JobLeaseLost()
 
     expected_height, expected_width = expected_dimensions(job)
     stage_started = time.perf_counter()
@@ -222,8 +241,7 @@ def process_job(upsampler, face_enhancer, job, lease_owner):
     metrics['resize_ms'] = (time.perf_counter() - stage_started) * 1000
     if job.get('face_enhance'):
         stage_started = time.perf_counter()
-        if not update_progress(job['id'], lease_owner, 88):
-            raise RuntimeError('Image job was cancelled')
+        check_progress(88)
         output = enhance_faces(output, face_enhancer)
         if output.shape[0:2] != (expected_height, expected_width):
             output = cv2.resize(output, (expected_width, expected_height), interpolation=cv2.INTER_LANCZOS4)
@@ -231,8 +249,7 @@ def process_job(upsampler, face_enhancer, job, lease_owner):
 
     suffix = 'jpg' if job.get('output_format') == 'jpeg' else job.get('output_format', 'png')
     temporary_path = TMP_DIR / f"{job['id']}.{lease_owner}.partial.{suffix}"
-    if not update_progress(job['id'], lease_owner, 95):
-        raise RuntimeError('Image job was cancelled')
+    check_progress(95)
     stage_started = time.perf_counter()
     encode_output(
         temporary_path,
@@ -248,6 +265,7 @@ def process_job(upsampler, face_enhancer, job, lease_owner):
         temporary_path.unlink(missing_ok=True)
         raise RuntimeError('Output image validation failed')
     metrics['verify_ms'] = (time.perf_counter() - stage_started) * 1000
+    check_progress(99)
     metrics['total_ms'] = (time.perf_counter() - started_clock) * 1000
     metrics['output_bytes'] = temporary_path.stat().st_size
     return temporary_path, metrics
@@ -290,6 +308,52 @@ def publish_success(job, lease_owner, temporary_path, metrics, worker_slot):
         connection.close()
 
 
+def run_claimed_job(job, lease_owner, slot, threads, upsamplers, face_enhancer):
+    set_worker_state(slot, f"processing:{job['id']}")
+    stop_event = threading.Event()
+    lost_event = threading.Event()
+    heartbeat = threading.Thread(
+        target=heartbeat_loop,
+        args=(stop_event, lost_event, job['id'], lease_owner),
+        daemon=True,
+    )
+    heartbeat.start()
+    temporary_path = None
+    metrics = None
+    failure = None
+    lease_lost = False
+    try:
+        model_key = (job.get('model_name') or 'general', int(job.get('tile_size') or 256))
+        if model_key not in upsamplers:
+            upsamplers[model_key] = create_upsampler(*model_key, threads)
+            while len(upsamplers) > 4:
+                upsamplers.popitem(last=False)
+        else:
+            upsamplers.move_to_end(model_key)
+        upsampler = upsamplers[model_key]
+        if job.get('face_enhance') and face_enhancer is None:
+            face_enhancer = create_face_enhancer()
+        temporary_path, metrics = process_job(upsampler, face_enhancer, job, lease_owner, lost_event)
+    except JobLeaseLost:
+        lease_lost = True  # Cancellation and lease transfer are owned by the API/reclaimer.
+    except Exception as error:
+        failure = error
+    finally:
+        stop_event.set()
+        heartbeat.join()  # Never publish while a renewal can still be in flight.
+
+    try:
+        if not lost_event.is_set() and failure is not None:
+            finish_job(job['id'], lease_owner, 'failed', str(failure)[:1000])
+        elif not lost_event.is_set() and not lease_lost and failure is None:
+            # publish_success verifies ownership inside the same transaction as os.replace.
+            publish_success(job, lease_owner, temporary_path, metrics, slot)
+    finally:
+        for partial in TMP_DIR.glob(f"{job['id']}.{lease_owner}.partial.*"):
+            partial.unlink(missing_ok=True)
+    return face_enhancer
+
+
 def worker_loop(slot):
     ensure_directories()
     init_db()
@@ -312,35 +376,7 @@ def worker_loop(slot):
             time.sleep(1)
             continue
 
-        set_worker_state(slot, f"processing:{job['id']}")
-        stop_event = threading.Event()
-        heartbeat = threading.Thread(
-            target=heartbeat_loop,
-            args=(stop_event, job['id'], lease_owner),
-            daemon=True,
-        )
-        heartbeat.start()
-        try:
-            model_key = (job.get('model_name') or 'general', int(job.get('tile_size') or 256))
-            if model_key not in upsamplers:
-                upsamplers[model_key] = create_upsampler(*model_key, threads)
-                while len(upsamplers) > 4:
-                    upsamplers.popitem(last=False)
-            else:
-                upsamplers.move_to_end(model_key)
-            upsampler = upsamplers[model_key]
-            if job.get('face_enhance') and face_enhancer is None:
-                face_enhancer = create_face_enhancer()
-            temporary_path, metrics = process_job(upsampler, face_enhancer, job, lease_owner)
-        except Exception as error:
-            for partial in TMP_DIR.glob(f"{job['id']}.{lease_owner}.partial.*"):
-                partial.unlink(missing_ok=True)
-            finish_job(job['id'], lease_owner, 'failed', str(error)[:1000])
-        else:
-            publish_success(job, lease_owner, temporary_path, metrics, slot)
-        finally:
-            stop_event.set()
-            heartbeat.join(timeout=2)
+        face_enhancer = run_claimed_job(job, lease_owner, slot, threads, upsamplers, face_enhancer)
         set_worker_state(slot, 'idle')
 
 

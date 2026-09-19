@@ -52,7 +52,7 @@ OIDC_SCOPES = os.getenv('OIDC_SCOPES', 'openid profile')
 # 缺失任一关键项时，即便 OIDC_ENABLED=true 也视为关闭（fail-closed）。
 OIDC_ENABLED = (
     os.getenv('OIDC_ENABLED', 'false').lower() in ('1', 'true', 'yes')
-    and bool(OIDC_CLIENT_ID and OIDC_CLIENT_SECRET and OIDC_REDIRECT_URI and (OIDC_ISSUER or OIDC_DISCOVERY_URL))
+    and bool(OIDC_CLIENT_ID and OIDC_CLIENT_SECRET and OIDC_REDIRECT_URI and OIDC_ISSUER)
 )
 
 ROLE_GUEST = 'guest'

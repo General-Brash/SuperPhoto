@@ -189,8 +189,11 @@ def test_decode_jwt_unverified_rejects_malformed():
 
 def test_discover_parses_and_caches():
     document = {
+        'issuer': 'https://issuer.example.com',
         'authorization_endpoint': 'https://issuer.example.com/authorize',
         'token_endpoint': 'https://issuer.example.com/token',
+        'jwks_uri': 'https://issuer.example.com/jwks',
+        'userinfo_endpoint': 'https://issuer.example.com/userinfo',
     }
     with mock.patch('app.common.oidc.urllib.request.urlopen') as urlopen:
         urlopen.return_value = _json_response(document)
@@ -204,7 +207,13 @@ def test_discover_parses_and_caches():
 
 def test_discover_derives_url_from_issuer():
     with mock.patch('app.common.oidc.urllib.request.urlopen') as urlopen:
-        urlopen.return_value = _json_response({'token_endpoint': 'x'})
+        urlopen.return_value = _json_response({
+            'issuer': 'https://issuer.example.com',
+            'token_endpoint': 'https://issuer.example.com/token',
+            'authorization_endpoint': 'https://issuer.example.com/authorize',
+            'jwks_uri': 'https://issuer.example.com/jwks',
+            'userinfo_endpoint': 'https://issuer.example.com/userinfo',
+        })
         oidc.discover(_config(discovery_url=''))
         request = urlopen.call_args[0][0]
     assert request.full_url == 'https://issuer.example.com/.well-known/openid-configuration'
@@ -269,35 +278,44 @@ def test_fetch_userinfo_missing_endpoint():
         oidc.fetch_userinfo(_config(), {}, access_token='AT')
 
 
-# --- soft-optional signature verification -----------------------------------
+# --- required signature verification ----------------------------------------
 
-def test_verify_signature_returns_none_without_library():
-    with mock.patch('app.common.oidc._load_jwt_library', return_value=None):
-        result = oidc.verify_signature_if_possible({'jwks_uri': 'https://x/jwks'}, 'a.b.c')
-    assert result is None
-
-
-def test_verify_signature_false_when_jwks_uri_missing():
-    fake_jwt = mock.Mock()
-    with mock.patch('app.common.oidc._load_jwt_library', return_value=fake_jwt):
-        result = oidc.verify_signature_if_possible({}, 'a.b.c')
-    assert result is False
+def test_verify_signature_rejects_missing_dependency():
+    with mock.patch('app.common.oidc._load_jwt_library', side_effect=ImportError):
+        with pytest.raises(OIDCError, match='unavailable'):
+            oidc.verify_signature_if_possible(
+                {'jwks_uri': 'https://x/jwks'}, 'a.b.c', config=_config()
+            )
 
 
-def test_verify_signature_true_when_library_verifies():
+def test_verify_signature_rejects_missing_keys():
+    with pytest.raises(OIDCError, match='keys'):
+        oidc.verify_signature_if_possible({}, 'a.b.c', config=_config())
+
+
+def test_verify_signature_returns_claims_when_library_verifies():
     fake_jwt = mock.Mock()
     fake_client = mock.Mock()
     fake_client.get_signing_key_from_jwt.return_value = mock.Mock(key='PUBKEY')
     fake_jwt.PyJWKClient.return_value = fake_client
-    fake_jwt.decode.return_value = {'sub': 'ok'}
+    fake_jwt.decode.return_value = {'sub': 'ok', 'iss': _config().issuer, 'aud': _config().client_id, 'exp': time.time() + 60}
     with mock.patch('app.common.oidc._load_jwt_library', return_value=fake_jwt):
-        result = oidc.verify_signature_if_possible({'jwks_uri': 'https://x/jwks'}, 'a.b.c')
-    assert result is True
+        result = oidc.verify_signature_if_possible(
+            {'jwks_uri': 'https://x/jwks'}, 'a.b.c', config=_config()
+        )
+    assert result['sub'] == 'ok'
+    fake_jwt.decode.assert_called_once()
+    assert fake_jwt.decode.call_args.kwargs['algorithms'] == ['RS256']
 
 
-def test_verify_signature_false_when_library_raises():
+def test_verify_signature_rejects_invalid_signature():
     fake_jwt = mock.Mock()
-    fake_jwt.PyJWKClient.side_effect = ValueError('bad key')
+    fake_client = mock.Mock()
+    fake_client.get_signing_key_from_jwt.return_value = mock.Mock(key='PUBKEY')
+    fake_jwt.PyJWKClient.return_value = fake_client
+    fake_jwt.decode.side_effect = ValueError('bad signature')
     with mock.patch('app.common.oidc._load_jwt_library', return_value=fake_jwt):
-        result = oidc.verify_signature_if_possible({'jwks_uri': 'https://x/jwks'}, 'a.b.c')
-    assert result is False
+        with pytest.raises(OIDCError, match='signature'):
+            oidc.verify_signature_if_possible(
+                {'jwks_uri': 'https://x/jwks'}, 'a.b.c', config=_config()
+            )
