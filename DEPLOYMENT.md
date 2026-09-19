@@ -1,7 +1,20 @@
 # SuperPhoto deployment
 
-SuperPhoto v1.0.4 runs Real-ESRGAN with OpenVINO CPU inference, a FastAPI web
-application, SQLite WAL state and two worker processes.
+SuperPhoto v1.1.0 runs the image-processing service with OpenVINO CPU
+inference, a FastAPI web application, SQLite WAL state and two worker
+processes.
+
+## Release metadata
+
+- Version: `v1.1.0` (source version: `1.1.0`)
+- Default image: `ghcr.io/general-brash/superphoto:v1.1.0`
+- API and worker use the same image. Override the defaults with
+  `IMAGE_REPOSITORY` and `IMAGE_TAG` when deploying a different registry or
+  image tag.
+- Release notes: v1.1.0 standardizes the versioned GHCR image reference for
+  both services and keeps image publication separate from the GitHub Release
+  metadata workflow. This document records deployment metadata only; it does
+  not claim that the GitHub release or GHCR image has already been published.
 
 ## Runtime
 

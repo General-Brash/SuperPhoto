@@ -2,40 +2,32 @@ name: release
 on:
   push:
     tags:
-      - '*'
+      - 'v1.1.0'
 
 jobs:
-  build:
-    permissions: write-all
+  release:
+    permissions:
+      contents: write
     name: Create Release
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v2
-      - name: Create Release
-        id: create_release
-        uses: actions/create-release@v1
+      - name: Create GitHub Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ github.ref }}
-          release_name: Real-ESRGAN ${{ github.ref }} Release Note
-          body: |
-            🚀 See you again 😸
-            🚀Have a nice day 😸 and happy everyday 😃
-            🚀 Long time no see ☄️
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "SuperPhoto v1.1.0" \
+            --latest \
+            --notes "$(cat <<'EOF'
+          ## What's changed
 
-            ✨ **Highlights**
-            ✅ [Features] Support ...
+          - Publishes the SuperPhoto v1.1.0 deployment metadata.
+          - Uses ghcr.io/general-brash/superphoto:v1.1.0 as the default image for both the API and worker services.
+          - Supports IMAGE_REPOSITORY and IMAGE_TAG overrides in Compose.
 
-            🐛 **Bug Fixes**
+          ## Deployment
 
-            🌴 **Improvements**
-
-            📢📢📢
-
-            <p align="center">
-               <img src="https://raw.githubusercontent.com/xinntao/Real-ESRGAN/master/assets/realesrgan_logo.png" height=150>
-            </p>
-          draft: true
-          prerelease: false
+          Docker image publication is intentionally separate from this workflow; push the image to GHCR locally as part of the release procedure.
+          EOF
+          )"

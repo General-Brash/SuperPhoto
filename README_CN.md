@@ -18,6 +18,22 @@ SuperPhoto 基于 [Real-ESRGAN](https://github.com/xinntao/Real-ESRGAN) 开源�
 
 仓库中的 Real-ESRGAN 模型、算法与上游文档归其原作者及上游项目所有；本项目新增的平台、任务、推理适配、部署与运维相关代码属于 SuperPhoto。
 
+### SuperPhoto v1.1.0
+
+- 发布版本：`v1.1.0`
+- 容器镜像：`ghcr.io/General-Brash/superphoto:v1.1.0`
+- 滚动标签：`ghcr.io/General-Brash/superphoto:latest`
+- 部署说明：[DEPLOYMENT.md](DEPLOYMENT.md)
+
+API 服务和 worker 服务使用同一个镜像。使用 Docker Compose 运行已发布镜像：
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+Compose 默认使用带版本号的 `v1.1.0` 镜像；如需部署其他构建版本，可通过 `IMAGE_REPOSITORY` 和 `IMAGE_TAG` 覆盖镜像仓库及标签。运行时状态、日志、上传图片和生成结果通过宿主机挂载，不会打包进容器镜像。
+
 :fire: 更新动漫视频的小模型 **RealESRGAN AnimeVideo-v3**. 更多信息在 [[动漫视频模型介绍](https://github.com/xinntao/Real-ESRGAN/blob/master/docs/anime_video_model.md)] 和 [[比较](https://github.com/xinntao/Real-ESRGAN/blob/master/docs/anime_comparisons_CN.md)] 中.
 
 1. Real-ESRGAN的[Colab Demo](https://colab.research.google.com/drive/1k2Zod6kSHEvraybHl50Lys0LerhyTMCo?usp=sharing) | Real-ESRGAN**动漫视频** 的[Colab Demo](https://colab.research.google.com/drive/1yNl9ORUxxlL4N0keJa2SEPB61imPQd1B?usp=sharing)

@@ -24,6 +24,22 @@ SuperPhoto is developed on top of the open-source [Real-ESRGAN](https://github.c
 
 The Real-ESRGAN models, algorithms, and upstream documentation remain credited to their original authors and upstream project. This repository adds the SuperPhoto-specific platform, task, inference-adaptation, deployment, and operations code.
 
+### SuperPhoto v1.1.0
+
+- Release: `v1.1.0`
+- Container image: `ghcr.io/General-Brash/superphoto:v1.1.0`
+- Rolling image tag: `ghcr.io/General-Brash/superphoto:latest`
+- Deployment guide: [DEPLOYMENT.md](DEPLOYMENT.md)
+
+The API and worker services use the same image. To run the published image with Docker Compose:
+
+```bash
+docker compose pull
+docker compose up -d
+```
+
+Compose defaults to the versioned `v1.1.0` image. Set `IMAGE_REPOSITORY` and `IMAGE_TAG` to override the registry or tag when deploying another build. Runtime state, logs, uploaded images, and generated outputs are mounted from the host and are not part of the container image.
+
 🔥 **AnimeVideo-v3 model (动漫视频小模型)**. Please see [[*anime video models*](https://github.com/xinntao/Real-ESRGAN/blob/master/docs/anime_video_model.md)] and [[*comparisons*](https://github.com/xinntao/Real-ESRGAN/blob/master/docs/anime_comparisons.md)]<br>
 🔥 **RealESRGAN_x4plus_anime_6B** for anime images **(动漫插图模型)**. Please see [[*anime_model*](https://github.com/xinntao/Real-ESRGAN/blob/master/docs/anime_model.md)]
 

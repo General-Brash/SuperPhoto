@@ -6,7 +6,7 @@ services:
       args:
         PYTHON_BASE_IMAGE: ${PYTHON_BASE_IMAGE:-mirror.taffy.edu.kg/basic_mirror/python:3.10-slim-bookworm}
       network: host
-    image: local/realesrgan:v1.0.4-openvino
+    image: ${IMAGE_REPOSITORY:-ghcr.io/general-brash/superphoto}:${IMAGE_TAG:-v1.1.0}
     container_name: realesrgan-api
     restart: unless-stopped
     init: true
@@ -68,7 +68,7 @@ services:
       start_period: 10s
 
   worker:
-    image: local/realesrgan:v1.0.4-openvino
+    image: ${IMAGE_REPOSITORY:-ghcr.io/general-brash/superphoto}:${IMAGE_TAG:-v1.1.0}
     container_name: realesrgan-worker
     restart: unless-stopped
     init: true
