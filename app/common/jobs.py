@@ -15,8 +15,6 @@ from .config import (
     SAFE_TILES,
     TARGET_RESOLUTIONS,
     USER_FILE_TTL_DAYS,
-    VIDEO_OUTPUT_FORMATS,
-    VIDEO_TARGET_RESOLUTIONS,
 )
 
 
@@ -29,11 +27,6 @@ RATIO_VALUES = {
 }
 
 TARGETS = {
-    ('16:9', '1k'): (1920, 1080),
-    ('9:16', '1k'): (1080, 1920),
-    ('4:3', '1k'): (1440, 1080),
-    ('3:4', '1k'): (1080, 1440),
-    ('1:1', '1k'): (1024, 1024),
     ('16:9', '2k'): (2560, 1440),
     ('16:9', '4k'): (3840, 2160),
     ('9:16', '2k'): (1440, 2560),
@@ -64,7 +57,6 @@ QUALITY_VALUES = {
 COMPRESSION_LEVELS = {1, 3, 5, 7, 9}
 DEFAULT_SECONDS_PER_MEGAPIXEL = 12.0
 MAX_CALIBRATION_SAMPLES = 200
-UPLOAD_TYPES = {'photo', 'video'}
 
 
 def parse_bool(value):
@@ -73,21 +65,8 @@ def parse_bool(value):
     return str(value).lower() in ('1', 'true', 'yes', 'on')
 
 
-def validate_upload_type(value):
-    """Validate the media mode accepted by the API contract.
-
-    Keep media mode validation in the shared settings path so API and worker
-    callers cannot accidentally mix image and video settings.
-    """
-    upload_type = value or 'photo'
-    if not isinstance(upload_type, str) or upload_type not in UPLOAD_TYPES:
-        raise HTTPException(400, 'Unsupported upload type')
-    return upload_type
-
-
 def validate_settings(raw, role, has_alpha=False):
     raw = raw or {}
-    upload_type = validate_upload_type(raw.get('upload_type', 'photo'))
     model = raw.get('model', 'general')
     target = raw.get('target_resolution', '4k')
     aspect = raw.get('aspect_ratio', 'original')
@@ -102,9 +81,7 @@ def validate_settings(raw, role, has_alpha=False):
         raise HTTPException(400, 'Unsupported model')
     if aspect not in ASPECT_RATIOS:
         raise HTTPException(400, 'Unsupported target resolution or aspect ratio')
-    if upload_type == 'video' and target not in VIDEO_TARGET_RESOLUTIONS:
-        raise HTTPException(400, 'Unsupported video target resolution')
-    if upload_type == 'photo' and target not in TARGET_RESOLUTIONS:
+    if target not in TARGET_RESOLUTIONS:
         raise HTTPException(400, 'Unsupported target resolution or aspect ratio')
     allowed_targets = {
         'guest': {'2k', '4k'},
@@ -112,30 +89,23 @@ def validate_settings(raw, role, has_alpha=False):
         ROLE_ADVANCED: {'2k', '4k', '6k', '8k'},
         ROLE_ADMIN: {'2k', '4k', '6k', '8k'},
     }.get(role, {'2k', '4k'})
-    if upload_type == 'photo' and target not in allowed_targets:
+    if target not in allowed_targets:
         raise HTTPException(403, 'Target resolution is not allowed for this account')
-    if upload_type == 'video' and role != ROLE_ADMIN:
-        raise HTTPException(403, 'Video processing is restricted to administrators')
-    if upload_type == 'video' and output_format not in VIDEO_OUTPUT_FORMATS:
-        raise HTTPException(400, 'Video output must be MP4 or WebM')
-    if upload_type == 'photo' and (output_format not in OUTPUT_FORMATS or quality not in QUALITY_PRESETS):
+    if output_format not in OUTPUT_FORMATS or quality not in QUALITY_PRESETS:
         raise HTTPException(400, 'Unsupported output format or quality')
     if compression not in COMPRESSION_LEVELS:
         raise HTTPException(400, 'Compression level must be one of 1, 3, 5, 7, or 9')
-    if upload_type == 'photo' and has_alpha and output_format == 'jpeg':
+    if has_alpha and output_format == 'jpeg':
         raise HTTPException(400, 'JPEG cannot preserve image transparency')
-    if upload_type == 'photo' and crop and aspect == 'original':
+    if crop and aspect == 'original':
         raise HTTPException(400, 'Cropping requires a target aspect ratio')
-    if upload_type == 'video':
-        allowed_tiles = ADMIN_TILES
-    elif role in (ROLE_ADVANCED, ROLE_ADMIN):
+    if role in (ROLE_ADVANCED, ROLE_ADMIN):
         allowed_tiles = ADMIN_TILES if role == ROLE_ADMIN else SAFE_TILES
     else:
         allowed_tiles = {256}
     if tile not in allowed_tiles:
         raise HTTPException(403, 'Tile size is not allowed for this account')
     return {
-        'upload_type': upload_type,
         'model_name': model,
         'target_resolution': target,
         'aspect_ratio': aspect,
@@ -235,14 +205,6 @@ def _stage_estimate(width, height, settings, observations):
 
 
 def estimate_processing_seconds(width, height, face_enhance=False, seconds_per_megapixel=None, observations=None, settings=None):
-    if settings and settings.get('upload_type') == 'video':
-        frames = int(settings.get('frame_count') or 0)
-        if frames <= 0:
-            frames = max(1, round(float(settings.get('duration_seconds') or 0) * float(settings.get('fps') or 24)))
-        per_frame = estimate_processing_seconds(
-            width, height, face_enhance, seconds_per_megapixel, observations, {**settings, 'upload_type': 'photo'}
-        )
-        return max(1, frames * per_frame)
     if seconds_per_megapixel:
         intercept, rate = 0.0, seconds_per_megapixel
     else:
@@ -269,15 +231,6 @@ def estimate_output_bytes(width, height, output_format, quality='high', compress
     return max(1024, round(pixels * max(0.03, bytes_per_pixel)))
 
 
-def estimate_video_output_bytes(width, height, fps, duration_seconds, output_format):
-    pixels_per_second = max(1, int(width) * int(height)) * max(1.0, float(fps or 24))
-    bits_per_pixel = 0.06 if output_format == 'webm' else 0.08
-    video_bitrate = max(1_000_000, min(80_000_000, round(pixels_per_second * bits_per_pixel)))
-    audio_bitrate = 128_000 if output_format == 'webm' else 192_000
-    duration = max(0.0, float(duration_seconds or 0))
-    return max(1024, round(duration * (video_bitrate + audio_bitrate) / 8))
-
-
 def detect_aspect(width, height, tolerance=0.001):
     ratio = width / height
     matches = [(name, abs(ratio - value) / value) for name, value in RATIO_VALUES.items()]
@@ -289,7 +242,7 @@ def target_dimensions(width, height, target, aspect='original', crop=False):
     effective_aspect = aspect if crop and aspect != 'original' else detect_aspect(width, height)
     if effective_aspect in RATIO_VALUES:
         return TARGETS[(effective_aspect, target)]
-    long_side = {'1k': 1920, '2k': 2560, '4k': 3840, '6k': 5760, '8k': 7680}[target]
+    long_side = {'2k': 2560, '4k': 3840, '6k': 5760, '8k': 7680}[target]
     if width >= height:
         return long_side, max(1, round(height * long_side / width))
     return max(1, round(width * long_side / height)), long_side

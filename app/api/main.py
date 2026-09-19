@@ -1,3 +1,6 @@
+import base64
+import hashlib
+import hmac
 import io
 import json
 import math
@@ -5,7 +8,6 @@ import os
 import re
 import shutil
 import sqlite3
-import subprocess
 import threading
 import time
 import urllib.parse
@@ -19,7 +21,7 @@ from pathlib import Path
 from fastapi import Body, FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.background import BackgroundTasks
 from fastapi.openapi.docs import get_swagger_ui_html
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image, ImageOps, UnidentifiedImageError
 from pydantic import BaseModel, Field
@@ -42,13 +44,14 @@ from app.common.config import (
     MAX_GLOBAL_JOBS,
     MAX_OUTPUT_PIXELS,
     GUEST_DAILY_QUOTA,
+    GUEST_ACTIVE_QUOTA,
     DEFAULT_IMAGE_QUOTAS,
-    DEFAULT_VIDEO_QUOTAS,
     MAX_SIDE,
     MIN_FREE_DISK_BYTES,
     MODEL_PATH,
     MODEL_REGISTRY,
     OUTPUT_DIR,
+    COOKIE_SECURE,
     ROLE_ADMIN,
     ROLE_ADVANCED,
     ROLE_GUEST,
@@ -56,18 +59,18 @@ from app.common.config import (
     SHARE_TTL_HOURS,
     STATIC_DIR,
     SESSION_SECRET,
+    OIDC_ENABLED,
+    OIDC_ISSUER,
+    OIDC_DISCOVERY_URL,
+    OIDC_CLIENT_ID,
+    OIDC_CLIENT_SECRET,
+    OIDC_REDIRECT_URI,
+    OIDC_SCOPES,
     TMP_DIR,
     TURNSTILE_REQUIRED,
     TURNSTILE_SECRET_KEY,
     TURNSTILE_SITE_KEY,
     VALID_ROLES,
-    FFMPEG_BIN,
-    FFPROBE_BIN,
-    VIDEO_INPUT_CODECS,
-    VIDEO_INPUT_EXTENSIONS,
-    VIDEO_MAX_FILE_BYTES,
-    VIDEO_MAX_HEIGHT,
-    VIDEO_MAX_WIDTH,
     ensure_directories,
     face_models_available,
 )
@@ -75,13 +78,13 @@ from app.common.db import connect, init_db, utc_now
 from app.common.jobs import (
     estimate_output_bytes,
     estimate_processing_seconds,
-    estimate_video_output_bytes,
     expiry_iso,
     output_extension,
     target_dimensions,
     validate_settings,
 )
 from app.common.security import hash_password, random_token, token_hash, verify_password
+from app.common import oidc as oidc_lib
 
 
 app = FastAPI(title='SuperPhoto API', version='1.0.4', docs_url=None, redoc_url=None, openapi_url=None)
@@ -89,6 +92,18 @@ Image.MAX_IMAGE_PIXELS = MAX_SIDE * MAX_SIDE
 USERNAME_PATTERN = re.compile(r'^[A-Za-z0-9_]{3,24}$')
 _rate_buckets = defaultdict(deque)
 _rate_lock = threading.Lock()
+_rate_last_sweep = 0.0
+
+OIDC_CONFIG = oidc_lib.OIDCConfig(
+    enabled=OIDC_ENABLED,
+    issuer=OIDC_ISSUER,
+    discovery_url=OIDC_DISCOVERY_URL,
+    client_id=OIDC_CLIENT_ID,
+    client_secret=OIDC_CLIENT_SECRET,
+    redirect_uri=OIDC_REDIRECT_URI,
+    scopes=OIDC_SCOPES,
+)
+OIDC_FLOW_COOKIE = 'superphoto_oidc_flow'
 
 
 @app.middleware('http')
@@ -127,12 +142,6 @@ class UserUpdatePayload(BaseModel):
     active_quota: int | None = None
     disabled: bool | None = None
     image_quotas: dict[str, int] | None = None
-    video_quotas: dict[str, int] | None = None
-    daily_image_quota: int | None = None
-    daily_video_quota: int | None = None
-    resolution_1k: int | None = None
-    resolution_2k: int | None = None
-    resolution_4k: int | None = None
 
 
 class ResetPasswordPayload(BaseModel):
@@ -144,9 +153,6 @@ class EstimateImagePayload(BaseModel):
     height: int
     has_alpha: bool = False
     size_bytes: int = 0
-    duration_seconds: float = 0
-    fps: float = 0
-    frame_count: int = 0
 
 
 class EstimatePayload(BaseModel):
@@ -159,6 +165,11 @@ def client_key(request):
 
 
 def rate_limit(request, name, limit, window_seconds):
+    # NOTE: This limiter is per-process (in-memory buckets guarded by a lock). With
+    # multiple uvicorn workers each process keeps its own counters, so the effective
+    # limit is multiplied by the worker count. A shared store (e.g. Redis) would be
+    # required for accurate cross-process limiting; that is out of scope here.
+    global _rate_last_sweep
     key = f'{name}:{client_key(request)}'
     now = time.monotonic()
     with _rate_lock:
@@ -168,6 +179,13 @@ def rate_limit(request, name, limit, window_seconds):
         if len(bucket) >= limit:
             raise HTTPException(429, 'Too many requests')
         bucket.append(now)
+        # Periodically reclaim buckets that have gone idle so abandoned client keys
+        # (e.g. one-off IPs) do not accumulate unbounded memory over time.
+        if now - _rate_last_sweep >= 300:
+            for stale in [k for k, b in _rate_buckets.items() if not b or b[-1] <= now - window_seconds]:
+                if stale != key:
+                    del _rate_buckets[stale]
+            _rate_last_sweep = now
 
 
 def validate_image(content):
@@ -197,106 +215,6 @@ def validate_image(content):
     return extension, width, height, has_alpha
 
 
-VIDEO_FORMAT_NAMES = {'mov', 'mp4', 'm4v', 'matroska', 'webm', 'avi', 'flv', 'mpeg'}
-
-
-def upload_looks_video(upload):
-    suffix = Path(upload.filename or '').suffix.lower()
-    content_type = (upload.content_type or '').lower()
-    return suffix in VIDEO_INPUT_EXTENSIONS or content_type.startswith('video/')
-
-
-def store_upload_stream(upload, max_bytes):
-    path = TMP_DIR / f'.incoming-{uuid.uuid4().hex}.part'
-    size = 0
-    try:
-        with path.open('wb') as target:
-            while True:
-                chunk = upload.file.read(1024 * 1024)
-                if not chunk:
-                    break
-                size += len(chunk)
-                if size > max_bytes:
-                    raise HTTPException(413, 'Video file exceeds the 1 GiB limit')
-                target.write(chunk)
-        return path, size
-    except HTTPException:
-        path.unlink(missing_ok=True)
-        raise
-    except OSError as error:
-        path.unlink(missing_ok=True)
-        raise HTTPException(500, f'Failed to store upload: {error}') from error
-
-
-def probe_video(path):
-    try:
-        result = subprocess.run(
-            [FFPROBE_BIN, '-v', 'error', '-print_format', 'json', '-show_streams', '-show_format', str(path)],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-        probe = json.loads(result.stdout)
-    except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as error:
-        raise HTTPException(400, 'Unable to inspect video; supported video codecs are required') from error
-    streams = probe.get('streams') or []
-    video = next((item for item in streams if item.get('codec_type') == 'video'), None)
-    if not video:
-        raise HTTPException(400, 'Video stream is missing')
-    format_name = str((probe.get('format') or {}).get('format_name') or '').split(',')[0].lower()
-    codec = str(video.get('codec_name') or '').lower()
-    if format_name not in VIDEO_FORMAT_NAMES:
-        raise HTTPException(400, 'Unsupported video container format')
-    if codec not in VIDEO_INPUT_CODECS:
-        raise HTTPException(400, 'Unsupported video codec')
-    try:
-        width, height = int(video.get('width') or 0), int(video.get('height') or 0)
-        duration = float(video.get('duration') or (probe.get('format') or {}).get('duration') or 0)
-        if not math.isfinite(duration) or duration < 0:
-            raise ValueError('invalid duration')
-        rotation = 0
-        rotation = int((video.get('tags') or {}).get('rotate') or 0)
-    except (TypeError, ValueError, OverflowError) as error:
-        raise HTTPException(400, 'Video metadata is invalid') from error
-    for side_data in video.get('side_data_list') or []:
-        if side_data.get('rotation') is not None:
-            try:
-                rotation = int(side_data['rotation'])
-            except (TypeError, ValueError):
-                pass
-    if abs(rotation) % 180 == 90:
-        width, height = height, width
-    if (width < 1 or height < 1 or max(width, height) > VIDEO_MAX_WIDTH
-            or min(width, height) > VIDEO_MAX_HEIGHT):
-        raise HTTPException(400, 'Video resolution must not exceed 1920x1080 (portrait videos may be 1080x1920)')
-    try:
-        fps_text = str(video.get('avg_frame_rate') or video.get('r_frame_rate') or '0/1')
-        numerator, denominator = fps_text.split('/', 1)
-        fps = float(numerator) / float(denominator)
-    except (ValueError, ZeroDivisionError):
-        fps = 0.0
-    if not math.isfinite(fps) or fps < 0 or fps > 240:
-        raise HTTPException(400, 'Video frame rate is invalid or unsupported')
-    try:
-        frame_count = int(video.get('nb_frames') or 0) or None
-    except (TypeError, ValueError, OverflowError):
-        frame_count = None
-    if frame_count is None and duration > 0 and fps > 0:
-        frame_count = max(1, round(duration * fps))
-    audio = next((item for item in streams if item.get('codec_type') == 'audio'), None)
-    return {
-        'extension': Path(path).suffix.lower() or '.mp4',
-        'width': width,
-        'height': height,
-        'duration_seconds': max(0.0, duration),
-        'fps': fps if fps > 0 else 24.0,
-        'frame_count': frame_count,
-        'video_codec': codec,
-        'audio_codec': str(audio.get('codec_name') or '') if audio else None,
-    }
-
-
 def serialize_user(row):
     result = {
         'id': row['id'],
@@ -307,13 +225,8 @@ def serialize_user(row):
         'disabled': bool(row['disabled']),
         'created_at': row['created_at'],
     }
-    # Optional per-user limits are added by newer schema migrations. Keep the
-    # admin API compatible with existing databases while exposing them when
-    # available.
-    for key in ('daily_image_quota', 'daily_video_quota', 'resolution_1k', 'resolution_2k', 'resolution_4k'):
-        if key in row.keys():
-            result[key] = row[key]
-    for key, defaults in (('image_quotas', DEFAULT_IMAGE_QUOTAS), ('video_quotas', DEFAULT_VIDEO_QUOTAS)):
+    # image_quotas 是唯一事实源；对旧库缺列做容错，缺失时回退默认值。
+    for key, defaults in (('image_quotas', DEFAULT_IMAGE_QUOTAS),):
         if key in row.keys():
             try:
                 value = json.loads(row[key] or '{}')
@@ -337,7 +250,6 @@ def serialize_job(connection, row):
         'id': row['id'],
         'batch_id': row['batch_id'],
         'original_name': row['original_name'],
-        'upload_type': row['upload_type'] if 'upload_type' in row.keys() else 'photo',
         'width': row['width'],
         'height': row['height'],
         'output_width': row['output_width'],
@@ -362,8 +274,6 @@ def serialize_job(connection, row):
         'started_at': row['started_at'],
         'finished_at': row['finished_at'],
         'expires_at': row['expires_at'],
-        'duration_seconds': row['duration_seconds'] if 'duration_seconds' in row.keys() else None,
-        'fps': row['fps'] if 'fps' in row.keys() else None,
     }
 
 
@@ -443,7 +353,7 @@ def usage_summary(connection, session):
     ).fetchone()[0]
     role = session.get('role') or ROLE_GUEST
     daily_quota = GUEST_DAILY_QUOTA if role == ROLE_GUEST else int(session['daily_quota'])
-    active_quota = 2 if role == ROLE_GUEST else int(session['active_quota'])
+    active_quota = GUEST_ACTIVE_QUOTA if role == ROLE_GUEST else int(session['active_quota'])
     return {
         'daily_quota': daily_quota,
         'used_today': used_today,
@@ -632,6 +542,14 @@ def legacy_health():
     return service_health()
 
 
+def model_capabilities():
+    return {
+        'general': MODEL_PATH.is_file(),
+        'anime': ANIME_MODEL_PATH.is_file(),
+        'face_enhance': face_models_available(),
+    }
+
+
 @app.get('/api/health')
 def service_health():
     with connect() as connection:
@@ -641,12 +559,7 @@ def service_health():
     return {
         'status': 'ok',
         'workers': [dict(worker) for worker in workers],
-        'models': {
-            'general': MODEL_PATH.is_file(),
-            'anime': ANIME_MODEL_PATH.is_file(),
-            'face_enhance': face_models_available(),
-            'video': shutil.which(FFMPEG_BIN) is not None and shutil.which(FFPROBE_BIN) is not None,
-        },
+        'models': model_capabilities(),
     }
 
 
@@ -666,7 +579,8 @@ def auth_me(request: Request, response: Response):
         'csrf_token': session['csrf_token'],
         'turnstile_site_key': TURNSTILE_SITE_KEY,
         'turnstile_required': TURNSTILE_REQUIRED,
-        'capabilities': service_health()['models'],
+        'capabilities': model_capabilities(),
+        'oidc_enabled': OIDC_ENABLED,
         'usage': usage,
     }
 
@@ -702,39 +616,22 @@ def api_estimate(payload: EstimatePayload, request: Request, response: Response)
         size_estimates = []
         for image in payload.images:
             settings = validate_settings(payload.settings, role, image.has_alpha)
-            if settings['upload_type'] == 'video':
-                if (image.width < 1 or image.height < 1 or max(image.width, image.height) > VIDEO_MAX_WIDTH
-                        or min(image.width, image.height) > VIDEO_MAX_HEIGHT):
-                    raise HTTPException(400, 'Video resolution must not exceed 1920x1080')
-                if image.size_bytes < 0 or image.size_bytes > VIDEO_MAX_FILE_BYTES:
-                    raise HTTPException(400, 'Video size metadata is invalid')
-                if any(not math.isfinite(value) or value < 0 for value in (image.duration_seconds, image.fps)):
-                    raise HTTPException(400, 'Video timing metadata is invalid')
-            elif image.width < 1 or image.height < 1 or image.width > MAX_SIDE or image.height > MAX_SIDE:
+            if image.width < 1 or image.height < 1 or image.width > MAX_SIDE or image.height > MAX_SIDE:
                 raise HTTPException(400, f'Image dimensions must be between 1 and {MAX_SIDE} pixels per side')
-            if settings['upload_type'] == 'photo' and image.width * image.height * 16 > MAX_OUTPUT_PIXELS:
+            if image.width * image.height * 16 > MAX_OUTPUT_PIXELS:
                 raise HTTPException(400, 'Estimated x4 intermediate image exceeds the 64 MP limit')
             output_width, output_height = target_dimensions(
                 image.width, image.height, settings['target_resolution'], settings['aspect_ratio'], bool(settings['crop_enabled'])
             )
-            if settings['upload_type'] == 'video':
-                output_width -= output_width % 2
-                output_height -= output_height % 2
             estimates.append(estimate_processing_seconds(
                 image.width, image.height, bool(settings['face_enhance']), observations=timing_samples,
                 settings={**settings, 'output_width': output_width, 'output_height': output_height,
-                          'has_alpha': image.has_alpha, 'duration_seconds': image.duration_seconds,
-                          'fps': image.fps, 'frame_count': image.frame_count},
+                          'has_alpha': image.has_alpha},
             ))
-            if settings['upload_type'] == 'video':
-                size_estimates.append(estimate_video_output_bytes(
-                    output_width, output_height, image.fps, image.duration_seconds, settings['output_format']
-                ))
-            else:
-                size_estimates.append(estimate_output_bytes(
-                    output_width, output_height, settings['output_format'], settings['quality_preset'],
-                    settings['compression_level'], size_samples,
-                ))
+            size_estimates.append(estimate_output_bytes(
+                output_width, output_height, settings['output_format'], settings['quality_preset'],
+                settings['compression_level'], size_samples,
+            ))
         usage = usage_summary(connection, session)
         processing_seconds = sum(estimates)
         estimated_queue = simulate_queue_seconds(connection, [])
@@ -827,6 +724,150 @@ def logout(request: Request, response: Response):
     return {'status': 'logged_out'}
 
 
+def _sign_oidc_flow(payload):
+    """Serialize + HMAC-sign the transient OIDC flow state for a short-lived cookie."""
+    raw = base64.urlsafe_b64encode(json.dumps(payload, separators=(',', ':')).encode('utf-8')).rstrip(b'=').decode('ascii')
+    signature = hmac.new(SESSION_SECRET.encode('utf-8'), raw.encode('utf-8'), hashlib.sha256).hexdigest()
+    return f'{raw}.{signature}'
+
+
+def _read_oidc_flow(cookie_value):
+    """Verify + decode the flow cookie; return the payload dict or None."""
+    if not cookie_value or '.' not in cookie_value:
+        return None
+    raw, _, signature = cookie_value.rpartition('.')
+    expected = hmac.new(SESSION_SECRET.encode('utf-8'), raw.encode('utf-8'), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(signature, expected):
+        return None
+    try:
+        padding = '=' * (-len(raw) % 4)
+        return json.loads(base64.urlsafe_b64decode(raw + padding))
+    except (ValueError, TypeError):
+        return None
+
+
+def _oidc_error_redirect(reason):
+    response = RedirectResponse(url=f'/?oidc_error={urllib.parse.quote(reason)}', status_code=303)
+    response.delete_cookie(OIDC_FLOW_COOKIE, path='/', secure=COOKIE_SECURE, samesite='lax')
+    return response
+
+
+def _oidc_unique_username(connection, userinfo):
+    """Derive a valid, unique username from userinfo, falling back to a random one."""
+    candidate = (userinfo.get('preferred_username') or userinfo.get('name') or '').strip()
+    candidate = re.sub(r'[^A-Za-z0-9_]', '', candidate)[:24]
+    if len(candidate) < 3:
+        candidate = f'sub2_{secrets.token_hex(4)}'
+    base = candidate
+    for _ in range(20):
+        exists = connection.execute(
+            'SELECT 1 FROM users WHERE username=? COLLATE NOCASE', (candidate,)
+        ).fetchone()
+        if not exists:
+            return candidate
+        suffix = secrets.token_hex(3)
+        candidate = f'{base[:17]}_{suffix}'
+    return f'sub2_{secrets.token_hex(8)}'
+
+
+@app.get('/api/auth/oidc/login')
+def oidc_login(request: Request, response: Response):
+    if not OIDC_ENABLED:
+        raise HTTPException(404, 'OIDC login is not enabled')
+    try:
+        discovery = oidc_lib.discover(OIDC_CONFIG)
+    except oidc_lib.OIDCError:
+        return _oidc_error_redirect('无法连接身份提供方')
+    verifier, challenge = oidc_lib.generate_pkce()
+    state = oidc_lib.generate_state()
+    nonce = oidc_lib.generate_nonce()
+    try:
+        url = oidc_lib.build_authorization_url(
+            OIDC_CONFIG, discovery, state=state, nonce=nonce, code_challenge=challenge
+        )
+    except oidc_lib.OIDCError:
+        return _oidc_error_redirect('身份提供方配置异常')
+    redirect = RedirectResponse(url=url, status_code=303)
+    redirect.set_cookie(
+        OIDC_FLOW_COOKIE,
+        _sign_oidc_flow({'state': state, 'nonce': nonce, 'verifier': verifier}),
+        max_age=600,
+        httponly=True,
+        secure=COOKIE_SECURE,
+        samesite='lax',
+        path='/',
+    )
+    return redirect
+
+
+@app.get('/api/auth/oidc/callback')
+def oidc_callback(request: Request, response: Response, code: str = '', state: str = '', error: str = ''):
+    if not OIDC_ENABLED:
+        raise HTTPException(404, 'OIDC login is not enabled')
+    if error:
+        return _oidc_error_redirect(error)
+    flow = _read_oidc_flow(request.cookies.get(OIDC_FLOW_COOKIE))
+    if not flow or not code or not state or not hmac.compare_digest(state, flow.get('state', '')):
+        return _oidc_error_redirect('登录状态校验失败，请重试')
+    try:
+        discovery = oidc_lib.discover(OIDC_CONFIG)
+        tokens = oidc_lib.exchange_code(OIDC_CONFIG, discovery, code=code, code_verifier=flow['verifier'])
+        id_token = tokens.get('id_token')
+        if not id_token:
+            return _oidc_error_redirect('身份提供方未返回 id_token')
+        _header, claims = oidc_lib.decode_jwt_unverified(id_token)
+        issuer = discovery.get('issuer') or OIDC_ISSUER
+        oidc_lib.validate_id_token(OIDC_CONFIG, claims, nonce=flow['nonce'], issuer=issuer)
+        oidc_lib.verify_signature_if_possible(discovery, id_token)
+        userinfo = oidc_lib.fetch_userinfo(OIDC_CONFIG, discovery, access_token=tokens.get('access_token', ''))
+    except oidc_lib.OIDCError:
+        return _oidc_error_redirect('身份提供方交互失败，请重试')
+    sub = userinfo.get('sub') or claims.get('sub')
+    if not sub:
+        return _oidc_error_redirect('身份提供方未返回用户标识')
+
+    connection = connect()
+    try:
+        session = get_session(connection, request, response, create=False)
+        connection.execute('BEGIN IMMEDIATE')
+        identity = connection.execute(
+            'SELECT * FROM oidc_identities WHERE issuer=? AND sub=?', (issuer, str(sub))
+        ).fetchone()
+        now = utc_now()
+        if identity:
+            user_id = identity['user_id']
+            connection.execute(
+                'UPDATE oidc_identities SET last_login_at=? WHERE id=?', (now, identity['id'])
+            )
+        else:
+            user_id = uuid.uuid4().hex
+            username = _oidc_unique_username(connection, userinfo)
+            connection.execute(
+                '''INSERT INTO users(id, username, password_hash, role, daily_quota, active_quota,
+                   created_at, updated_at) VALUES (?, ?, 'oidc$disabled', 'user', 30, 10, ?, ?)''',
+                (user_id, username, now, now),
+            )
+            connection.execute(
+                '''INSERT INTO oidc_identities(id, issuer, sub, user_id, created_at, last_login_at)
+                   VALUES (?, ?, ?, ?, ?, ?)''',
+                (uuid.uuid4().hex, issuer, str(sub), user_id, now, now),
+            )
+        if session:
+            connection.execute(
+                'UPDATE uploads SET owner_user_id=? WHERE owner_session_id=?', (user_id, session['id'])
+            )
+        redirect = RedirectResponse(url='/', status_code=303)
+        rotate_session(connection, request, redirect, user_id)
+        connection.commit()
+    except sqlite3.IntegrityError:
+        connection.rollback()
+        return _oidc_error_redirect('账户关联失败，请重试')
+    finally:
+        connection.close()
+    redirect.delete_cookie(OIDC_FLOW_COOKIE, path='/', secure=COOKIE_SECURE, samesite='lax')
+    return redirect
+
+
 @app.post('/api/auth/password')
 def change_password(payload: PasswordPayload, request: Request, response: Response):
     with connect() as connection:
@@ -840,6 +881,10 @@ def change_password(payload: PasswordPayload, request: Request, response: Respon
         except ValueError as error:
             raise HTTPException(400, str(error)) from error
         connection.execute('UPDATE users SET password_hash=?, updated_at=? WHERE id=?', (new_hash, utc_now(), user['id']))
+        # Invalidate every existing session for this user (matching admin reset), then
+        # re-issue the current session so the caller stays logged in.
+        connection.execute('DELETE FROM sessions WHERE user_id=?', (user['id'],))
+        rotate_session(connection, request, response, user['id'])
     return {'status': 'password_changed'}
 
 
@@ -862,7 +907,7 @@ def delete_account(request: Request, response: Response):
         connection.execute('DELETE FROM jobs WHERE owner_user_id=?', (session['user_id'],))
         connection.execute('DELETE FROM batches WHERE owner_user_id=?', (session['user_id'],))
         connection.execute('DELETE FROM users WHERE id=?', (session['user_id'],))
-        response.delete_cookie('superphoto_session', path='/')
+        clear_session(connection, request, response)
     return {'status': 'account_deleted'}
 
 
@@ -890,49 +935,23 @@ def create_uploads(request: Request, response: Response, files: list[UploadFile]
 
         result = []
         for upload in files:
-            is_video = upload_looks_video(upload)
-            if is_video and role != ROLE_ADMIN:
-                raise HTTPException(403, 'Video processing is restricted to administrators')
-            if is_video:
-                incoming_path, size_bytes = store_upload_stream(upload, VIDEO_MAX_FILE_BYTES)
-                try:
-                    metadata = probe_video(incoming_path)
-                except Exception:
-                    incoming_path.unlink(missing_ok=True)
-                    raise
-                extension = Path(upload.filename or '').suffix.lower()
-                if extension not in VIDEO_INPUT_EXTENSIONS:
-                    extension = '.mp4'
-                width, height, has_alpha = metadata['width'], metadata['height'], False
-                content = None
-            else:
-                content = upload.file.read(MAX_FILE_BYTES + 1)
-                extension, width, height, has_alpha = validate_image(content)
-                size_bytes = len(content)
+            content = upload.file.read(MAX_FILE_BYTES + 1)
+            extension, width, height, has_alpha = validate_image(content)
+            size_bytes = len(content)
             upload_id = uuid.uuid4().hex
             stored_path = f'upload-{upload_id}{extension}'
             path = TMP_DIR / stored_path
-            if content is not None:
-                path.write_bytes(content)
-            else:
-                os.replace(incoming_path, path)
+            path.write_bytes(content)
             created_paths.append(path)
             expires_at = expiry_iso(session.get('user_id'))
             connection.execute(
                 '''INSERT INTO uploads(
                        id, owner_session_id, owner_user_id, original_name, stored_path,
-                       extension, width, height, has_alpha, size_bytes, created_at, expires_at,
-                       upload_type, duration_seconds, fps, frame_count, video_codec, audio_codec
-                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                       extension, width, height, has_alpha, size_bytes, created_at, expires_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                 (
                     upload_id, session['id'], session.get('user_id'), upload.filename or 'image', stored_path,
                     extension, width, height, int(has_alpha), size_bytes, utc_now(), expires_at,
-                    'video' if is_video else 'photo',
-                    metadata['duration_seconds'] if is_video else None,
-                    metadata['fps'] if is_video else None,
-                    metadata['frame_count'] if is_video else None,
-                    metadata['video_codec'] if is_video else None,
-                    metadata['audio_codec'] if is_video else None,
                 ),
             )
             result.append({
@@ -942,10 +961,6 @@ def create_uploads(request: Request, response: Response, files: list[UploadFile]
                 'height': height,
                 'has_alpha': has_alpha,
                 'size_bytes': size_bytes,
-                'upload_type': 'video' if is_video else 'photo',
-                'duration_seconds': metadata['duration_seconds'] if is_video else None,
-                'fps': metadata['fps'] if is_video else None,
-                'frame_count': metadata['frame_count'] if is_video else None,
                 'expires_at': expires_at,
             })
         connection.commit()
@@ -998,9 +1013,6 @@ def create_modern_batch(request, response, files, upload_ids_text, settings_text
         session = get_session(connection, request, response)
         require_csrf(request, session)
         role = session.get('role') or ROLE_GUEST
-        requested_upload_type = base_settings.get('upload_type', 'photo')
-        if requested_upload_type == 'video' and role != ROLE_ADMIN:
-            raise HTTPException(403, 'Video processing is restricted to administrators')
         batch_limit = 2 if role == ROLE_GUEST else MAX_BATCH_FILES
         item_count = len(files) + len(upload_ids)
         if item_count < 1 or item_count > batch_limit:
@@ -1022,36 +1034,13 @@ def create_modern_batch(request, response, files, upload_ids_text, settings_text
                 'width': row['width'],
                 'height': row['height'],
                 'has_alpha': bool(row['has_alpha']),
-                'upload_type': row['upload_type'] if 'upload_type' in row.keys() else 'photo',
-                'duration_seconds': row['duration_seconds'] if 'duration_seconds' in row.keys() else None,
-                'fps': row['fps'] if 'fps' in row.keys() else None,
-                'frame_count': row['frame_count'] if 'frame_count' in row.keys() else None,
-                'video_codec': row['video_codec'] if 'video_codec' in row.keys() else None,
-                'audio_codec': row['audio_codec'] if 'audio_codec' in row.keys() else None,
             })
         for upload in files:
-            is_video = upload_looks_video(upload)
-            if is_video:
-                if role != ROLE_ADMIN:
-                    raise HTTPException(403, 'Video processing is restricted to administrators')
-                incoming_path, size_bytes = store_upload_stream(upload, VIDEO_MAX_FILE_BYTES)
-                metadata = probe_video(incoming_path)
-                extension = Path(upload.filename or '').suffix.lower()
-                if extension not in VIDEO_INPUT_EXTENSIONS:
-                    extension = '.mp4'
-                transient_paths.append(incoming_path)
-                content = None
-                width, height, has_alpha = metadata['width'], metadata['height'], False
-            else:
-                content = upload.file.read(MAX_FILE_BYTES + 1)
-                extension, width, height, has_alpha = validate_image(content)
-                metadata, size_bytes = {}, len(content)
-            if content is None:
-                temp_path = incoming_path
-            else:
-                temp_path = TMP_DIR / f'{uuid.uuid4().hex}.upload'
-                temp_path.write_bytes(content)
-                transient_paths.append(temp_path)
+            content = upload.file.read(MAX_FILE_BYTES + 1)
+            extension, width, height, has_alpha = validate_image(content)
+            temp_path = TMP_DIR / f'{uuid.uuid4().hex}.upload'
+            temp_path.write_bytes(content)
+            transient_paths.append(temp_path)
             source_items.append({
                 'upload_id': None,
                 'original_name': upload.filename or 'image',
@@ -1060,8 +1049,6 @@ def create_modern_batch(request, response, files, upload_ids_text, settings_text
                 'width': width,
                 'height': height,
                 'has_alpha': has_alpha,
-                'upload_type': 'video' if is_video else 'photo',
-                **metadata,
             })
 
         for index, source in enumerate(source_items):
@@ -1074,8 +1061,6 @@ def create_modern_batch(request, response, files, upload_ids_text, settings_text
             if isinstance(item_override, dict):
                 merged.update(item_override)
             validated_settings = validate_settings(merged, role, has_alpha)
-            if source.get('upload_type', 'photo') != validated_settings['upload_type']:
-                raise HTTPException(400, 'Upload type does not match the selected media')
             selected_model = MODEL_REGISTRY[validated_settings['model_name']]
             if not selected_model['path'].is_file():
                 raise HTTPException(503, f'{selected_model["label"]} model is not available')
@@ -1088,9 +1073,6 @@ def create_modern_batch(request, response, files, upload_ids_text, settings_text
                 validated_settings['aspect_ratio'],
                 bool(validated_settings['crop_enabled']),
             )
-            if validated_settings['upload_type'] == 'video':
-                output_width -= output_width % 2
-                output_height -= output_height % 2
             job_id = uuid.uuid4().hex
             output_name = f'{job_id}.{output_extension(validated_settings["output_format"])}'
             prepared.append(
@@ -1103,24 +1085,14 @@ def create_modern_batch(request, response, files, upload_ids_text, settings_text
                     'output_path': OUTPUT_DIR / output_name,
                     'width': width,
                     'height': height,
-                    'upload_type': source.get('upload_type', 'photo'),
-                    'duration_seconds': source.get('duration_seconds'),
-                    'fps': source.get('fps'),
-                    'frame_count': source.get('frame_count'),
-                    'video_codec': source.get('video_codec'),
-                    'audio_codec': source.get('audio_codec'),
                     'output_width': output_width,
                     'output_height': output_height,
                     'estimated_seconds': estimate_processing_seconds(
                         width, height, bool(validated_settings['face_enhance']), observations=timing_samples,
                         settings={**validated_settings, 'output_width': output_width, 'output_height': output_height,
-                                  'has_alpha': has_alpha, 'duration_seconds': source.get('duration_seconds'),
-                                  'fps': source.get('fps'), 'frame_count': source.get('frame_count')},
+                                  'has_alpha': has_alpha},
                     ),
-                    'estimated_output_bytes': estimate_video_output_bytes(
-                        output_width, output_height, source.get('fps'), source.get('duration_seconds'),
-                        validated_settings['output_format'],
-                    ) if validated_settings['upload_type'] == 'video' else estimate_output_bytes(
+                    'estimated_output_bytes': estimate_output_bytes(
                         output_width, output_height, validated_settings['output_format'],
                         validated_settings['quality_preset'], validated_settings['compression_level'],
                     ),
@@ -1147,21 +1119,20 @@ def create_modern_batch(request, response, files, upload_ids_text, settings_text
             (midnight, *values),
         ).fetchone()[0]
         daily_quota = GUEST_DAILY_QUOTA if role == ROLE_GUEST else int(session['daily_quota'])
-        active_quota = 2 if role == ROLE_GUEST else int(session['active_quota'])
+        active_quota = GUEST_ACTIVE_QUOTA if role == ROLE_GUEST else int(session['active_quota'])
         if role != ROLE_GUEST and session.get('user_id'):
-            user_row = connection.execute('SELECT image_quotas, video_quotas FROM users WHERE id=?', (session['user_id'],)).fetchone()
-            for media, defaults, column in (('photo', DEFAULT_IMAGE_QUOTAS, 'image_quotas'), ('video', DEFAULT_VIDEO_QUOTAS, 'video_quotas')):
-                try:
-                    limits = {key: int(json.loads(user_row[column] or '{}').get(key, 0)) for key in defaults}
-                except (TypeError, ValueError, json.JSONDecodeError):
-                    limits = dict(defaults)
-                for resolution, requested in __import__('collections').Counter(item['target_resolution'] for item in prepared if item['upload_type'] == media).items():
-                    used = connection.execute(
-                        f'SELECT COUNT(*) FROM jobs WHERE created_at >= ? AND deleted_at IS NULL AND target_resolution=? AND upload_type=? AND {clause}',
-                        (midnight, resolution, media, *values),
-                    ).fetchone()[0]
-                    if limits.get(resolution, 0) <= 0 or used + requested > limits.get(resolution, 0):
-                        raise HTTPException(429, f'{media} {resolution} quota exceeded')
+            user_row = connection.execute('SELECT image_quotas FROM users WHERE id=?', (session['user_id'],)).fetchone()
+            try:
+                limits = {key: int(json.loads(user_row['image_quotas'] or '{}').get(key, 0)) for key in DEFAULT_IMAGE_QUOTAS}
+            except (TypeError, ValueError, json.JSONDecodeError):
+                limits = dict(DEFAULT_IMAGE_QUOTAS)
+            for resolution, requested in __import__('collections').Counter(item['target_resolution'] for item in prepared).items():
+                used = connection.execute(
+                    f'SELECT COUNT(*) FROM jobs WHERE created_at >= ? AND deleted_at IS NULL AND target_resolution=? AND {clause}',
+                    (midnight, resolution, *values),
+                ).fetchone()[0]
+                if limits.get(resolution, 0) <= 0 or used + requested > limits.get(resolution, 0):
+                    raise HTTPException(429, f'image {resolution} quota exceeded')
         if active + len(prepared) > MAX_GLOBAL_JOBS:
             raise HTTPException(429, 'Global queue is full')
         if owner_active + len(prepared) > active_quota:
@@ -1185,9 +1156,8 @@ def create_modern_batch(request, response, files, upload_ids_text, settings_text
                     input_path, output_path, width, height, status, created_at, expires_at,
                     model_name, target_resolution, aspect_ratio, crop_enabled, face_enhance,
                     output_format, quality_preset, compression_level, tile_size, output_width,
-                    output_height, estimated_seconds, upload_type, duration_seconds, fps,
-                    frame_count, video_codec, audio_codec
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                    output_height, estimated_seconds
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                 (
                     item['id'], batch_id, session['id'], session['id'], session.get('user_id'),
                     item['original_name'], item['input_path'].name, item['output_path'].name,
@@ -1195,9 +1165,7 @@ def create_modern_batch(request, response, files, upload_ids_text, settings_text
                     item['target_resolution'], item['aspect_ratio'], item['crop_enabled'],
                     item['face_enhance'], item['output_format'], item['quality_preset'],
                     item['compression_level'], item['tile_size'], item['output_width'],
-                    item['output_height'], item['estimated_seconds'], item['upload_type'],
-                    item.get('duration_seconds'), item.get('fps'), item.get('frame_count'),
-                    item.get('video_codec'), item.get('audio_codec'),
+                    item['output_height'], item['estimated_seconds'],
                 ),
             )
             if item['upload_id']:
@@ -1326,8 +1294,6 @@ def retry_job(job_id: str, request: Request, response: Response):
         row = owned_job(connection, job_id, session)
         if row['status'] not in ('failed', 'cancelled'):
             raise HTTPException(409, 'Only failed or cancelled jobs can be retried')
-        if row['upload_type'] == 'video' and session.get('role') != ROLE_ADMIN:
-            raise HTTPException(403, 'Video processing is restricted to administrators')
         input_path = (INPUT_DIR / row['input_path']).resolve()
         if input_path.parent != INPUT_DIR.resolve() or input_path.is_symlink() or not input_path.is_file():
             raise HTTPException(410, 'Original input file is missing and cannot be retried')
@@ -1339,7 +1305,7 @@ def retry_job(job_id: str, request: Request, response: Response):
             f"SELECT COUNT(*) FROM jobs WHERE status IN ('queued','processing') AND deleted_at IS NULL AND {clause}",
             values,
         ).fetchone()[0]
-        active_quota = 2 if not session.get('user_id') else int(session['active_quota'])
+        active_quota = GUEST_ACTIVE_QUOTA if not session.get('user_id') else int(session['active_quota'])
         if global_active >= MAX_GLOBAL_JOBS:
             raise HTTPException(429, 'Global queue is full')
         if owner_active >= active_quota:
@@ -1391,24 +1357,6 @@ def preview_file(path, cache_key):
     preview_dir = TMP_DIR / 'previews'
     preview_dir.mkdir(parents=True, exist_ok=True)
     cache_path = preview_dir / f'{cache_key}.webp'
-    if path.suffix.lower() in VIDEO_INPUT_EXTENSIONS | {'.mp4', '.webm'}:
-        jpeg_path = preview_dir / f'{cache_key}.jpg'
-        if jpeg_path.is_file() and jpeg_path.stat().st_mtime_ns >= source_stat.st_mtime_ns:
-            return jpeg_path, 'image/jpeg'
-        try:
-            frame = subprocess.run(
-                [FFMPEG_BIN, '-v', 'error', '-i', str(path), '-map', '0:v:0', '-frames:v', '1', '-vf', 'scale=1600:-2',
-                 '-f', 'image2pipe', '-vcodec', 'mjpeg', 'pipe:1'],
-                check=True, capture_output=True, timeout=60,
-            ).stdout
-            if not frame:
-                raise ValueError('empty video frame')
-            temporary = preview_dir / f'.{cache_key}.{uuid.uuid4().hex}.tmp'
-            temporary.write_bytes(frame)
-            os.replace(temporary, jpeg_path)
-            return jpeg_path, 'image/jpeg'
-        except (OSError, subprocess.SubprocessError, ValueError) as error:
-            raise HTTPException(410, 'Preview is unavailable') from error
     try:
         if cache_path.is_file() and cache_path.stat().st_mtime_ns >= source_stat.st_mtime_ns:
             return cache_path, 'image/webp'
@@ -1647,38 +1595,6 @@ def admin_update_user(user_id: str, payload: UserUpdatePayload, request: Request
                 raise HTTPException(400, f'Invalid {field}')
             return json.dumps({key: int(current.get(key, 0)) for key in defaults}, separators=(',', ':'))
         updates['image_quotas'] = normalize_quotas(payload.image_quotas, DEFAULT_IMAGE_QUOTAS, 'image_quotas')
-        updates['video_quotas'] = normalize_quotas(payload.video_quotas, DEFAULT_VIDEO_QUOTAS, 'video_quotas')
-        # Legacy admin controls map to the canonical per-resolution JSON fields.
-        if payload.daily_image_quota is not None or any(getattr(payload, f'resolution_{key}') is not None for key in ('1k', '2k', '4k')):
-            image = json.loads(updates['image_quotas'])
-            if payload.daily_image_quota is not None:
-                image = {key: payload.daily_image_quota for key in image}
-            for key in ('1k', '2k', '4k'):
-                flag = getattr(payload, f'resolution_{key}')
-                if flag is not None and key in image and flag == 0:
-                    image[key] = 0
-            updates['image_quotas'] = json.dumps(image, separators=(',', ':'))
-        if payload.daily_video_quota is not None or any(getattr(payload, f'resolution_{key}') is not None for key in ('1k', '2k', '4k')):
-            video = json.loads(updates['video_quotas'])
-            if payload.daily_video_quota is not None:
-                video = {key: payload.daily_video_quota for key in video}
-            for key in ('1k', '2k', '4k'):
-                flag = getattr(payload, f'resolution_{key}')
-                if flag is not None and flag == 0:
-                    video[key] = 0
-            updates['video_quotas'] = json.dumps(video, separators=(',', ':'))
-        optional = ('daily_image_quota', 'daily_video_quota', 'resolution_1k', 'resolution_2k', 'resolution_4k')
-        columns = {row[1] for row in connection.execute('PRAGMA table_info(users)').fetchall()}
-        for name in optional:
-            value = getattr(payload, name)
-            if value is not None:
-                if value < 0 or value > 10000:
-                    raise HTTPException(400, f'{name} is outside the allowed range')
-                if name.startswith('resolution_') and value not in (0, 1):
-                    raise HTTPException(400, f'{name} must be 0 or 1')
-                if name not in columns:
-                    raise HTTPException(409, 'User permission fields require database migration')
-                updates[name] = value
         assignments = ', '.join(f'{key}=?' for key in updates)
         connection.execute(f'UPDATE users SET {assignments} WHERE id=?', (*updates.values(), user_id))
         if disabled:

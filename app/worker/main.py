@@ -1,17 +1,14 @@
 import os
 import multiprocessing
-import shutil
 import signal
-import subprocess
 import threading
 import time
 import uuid
 from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 import cv2
-import numpy as np
 
-from app.common.config import FFMPEG_BIN, FFPROBE_BIN, GFPGAN_MODEL_PATH, INPUT_DIR, MIN_FREE_DISK_BYTES, MODEL_REGISTRY, MODEL_PATH, OUTPUT_DIR, TMP_DIR, ensure_directories, face_models_available
+from app.common.config import GFPGAN_MODEL_PATH, INPUT_DIR, MODEL_REGISTRY, MODEL_PATH, OUTPUT_DIR, TMP_DIR, ensure_directories, face_models_available
 from app.common.db import connect, init_db, utc_now
 from app.common.jobs import QUALITY_VALUES, crop_box
 from app.inference import OpenVINORealESRGANer
@@ -26,7 +23,8 @@ def set_worker_state(slot, value):
         )
 
 
-LEASE_SECONDS = 30
+LEASE_SECONDS = 60
+HEARTBEAT_SECONDS = 15
 
 
 def lease_deadline():
@@ -45,15 +43,10 @@ def claim_job(lease_owner):
         )
         job = connection.execute(
             '''SELECT * FROM jobs
-               WHERE ((status='queued' AND deleted_at IS NULL AND (expires_at IS NULL OR expires_at > ?))
-                  OR (status='processing' AND lease_expires_at < ? AND attempts < 2))
-                 AND (upload_type!='video' OR NOT EXISTS (
-                     SELECT 1 FROM jobs active_video
-                     WHERE active_video.status='processing' AND active_video.upload_type='video'
-                       AND active_video.lease_expires_at >= ?
-                 ))
+               WHERE (status='queued' AND deleted_at IS NULL AND (expires_at IS NULL OR expires_at > ?))
+                  OR (status='processing' AND lease_expires_at < ? AND attempts < 2)
                ORDER BY sequence LIMIT 1''',
-            (utc_now(), utc_now(), utc_now()),
+            (utc_now(), utc_now()),
         ).fetchone()
         if not job:
             connection.commit()
@@ -101,7 +94,7 @@ def update_progress(job_id, lease_owner, progress):
 
 
 def heartbeat_loop(stop_event, job_id, lease_owner):
-    while not stop_event.wait(10):
+    while not stop_event.wait(HEARTBEAT_SECONDS):
         if not renew_lease(job_id, lease_owner):
             return
 
@@ -114,16 +107,6 @@ def expected_dimensions(job):
 
 
 def valid_output(path, job):
-    if job.get('upload_type') == 'video':
-        try:
-            result = subprocess.run(
-                [FFPROBE_BIN, '-v', 'error', '-select_streams', 'v:0', '-show_entries',
-                 'stream=width,height', '-of', 'csv=p=0:s=x', str(path)],
-                check=True, capture_output=True, text=True, timeout=30,
-            )
-            return result.stdout.strip() == f"{job.get('output_width')}x{job.get('output_height')}"
-        except (OSError, subprocess.SubprocessError):
-            return False
     image = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
     return image is not None and image.shape[0:2] == expected_dimensions(job)
 
@@ -192,99 +175,7 @@ def encode_output(path, image, output_format, quality, compression_level=5):
         raise RuntimeError('Failed to encode output image')
 
 
-def process_video_job(upsampler, face_enhancer, job, lease_owner):
-    input_path = INPUT_DIR / job['input_path']
-    output_width, output_height = expected_dimensions(job)[1], expected_dimensions(job)[0]
-    fps = float(job.get('fps') or 24.0)
-    frame_count = int(job.get('frame_count') or 0)
-    output_format = job.get('output_format') or 'mp4'
-    suffix = 'mp4' if output_format == 'mp4' else 'webm'
-    temporary_path = TMP_DIR / f"{job['id']}.{lease_owner}.partial.{suffix}"
-    source_width, source_height = int(job['width']), int(job['height'])
-    decode_command = [FFMPEG_BIN, '-v', 'error', '-i', str(input_path), '-f', 'rawvideo',
-                      '-pix_fmt', 'bgr24', '-vsync', '0', 'pipe:1']
-    decode = subprocess.Popen(
-        decode_command,
-        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-    )
-    if output_format == 'webm':
-        video_args = ['-c:v', 'libvpx-vp9', '-crf', '32', '-b:v', '0', '-pix_fmt', 'yuv420p',
-                      '-c:a', 'libopus', '-b:a', '128k']
-    else:
-        video_args = ['-c:v', 'libx264', '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p',
-                      '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart']
-    encode = subprocess.Popen(
-        [FFMPEG_BIN, '-y', '-v', 'error', '-f', 'rawvideo', '-pix_fmt', 'bgr24',
-         '-s', f'{output_width}x{output_height}', '-r', str(fps), '-i', 'pipe:0',
-         '-i', str(input_path), '-map', '0:v:0', '-map', '1:a:0?', '-shortest', *video_args,
-         str(temporary_path)], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
-    frame_bytes = source_width * source_height * 3
-    processed = 0
-    started = time.perf_counter()
-    try:
-        while True:
-            data = decode.stdout.read(frame_bytes)
-            if not data:
-                break
-            if len(data) != frame_bytes:
-                raise RuntimeError('Video decoder returned a partial frame')
-            image = np.frombuffer(data, dtype=np.uint8).reshape((source_height, source_width, 3))
-            if job.get('crop_enabled') and job.get('aspect_ratio') != 'original':
-                left, top, right, bottom = crop_box(image.shape[1], image.shape[0], job['aspect_ratio'])
-                image = image[top:bottom, left:right]
-            output, _ = upsampler.enhance(image, outscale=4)
-            if output.shape[0:2] != (output_height, output_width):
-                output = cv2.resize(output, (output_width, output_height), interpolation=cv2.INTER_LANCZOS4)
-            if job.get('face_enhance'):
-                output = enhance_faces(output, face_enhancer)
-            encode.stdin.write(output.astype('uint8').tobytes())
-            processed += 1
-            if processed % 30 == 0 and shutil.disk_usage(TMP_DIR).free < MIN_FREE_DISK_BYTES:
-                raise RuntimeError('Video processing stopped because free disk space is below the safety reserve')
-            if frame_count:
-                if not update_progress(job['id'], lease_owner, 5 + int(90 * processed / frame_count)):
-                    raise RuntimeError('Video job was cancelled')
-    except Exception:
-        decode.kill()
-        encode.kill()
-        raise
-    finally:
-        if decode.stdout:
-            decode.stdout.close()
-        try:
-            decode.wait(timeout=30)
-        except subprocess.TimeoutExpired:
-            decode.kill()
-            decode.wait()
-        if encode.stdin:
-            encode.stdin.close()
-        try:
-            encode.wait(timeout=120)
-        except subprocess.TimeoutExpired:
-            encode.kill()
-            encode.wait()
-    if decode.returncode != 0:
-        raise RuntimeError('Video decode failed')
-    if encode.returncode != 0:
-        raise RuntimeError('Video encode failed')
-    if not temporary_path.is_file() or temporary_path.stat().st_size == 0:
-        raise RuntimeError('Video output validation failed')
-    return temporary_path, {
-        'decode_ms': 0,
-        'sr_ms': (time.perf_counter() - started) * 1000,
-        'resize_ms': 0,
-        'face_ms': 0,
-        'encode_ms': 0,
-        'verify_ms': 0,
-        'total_ms': (time.perf_counter() - started) * 1000,
-        'output_bytes': temporary_path.stat().st_size,
-    }
-
-
 def process_job(upsampler, face_enhancer, job, lease_owner):
-    if job.get('upload_type') == 'video':
-        return process_video_job(upsampler, face_enhancer, job, lease_owner)
     started_clock = time.perf_counter()
     metrics = {'decode_ms': 0, 'sr_ms': 0, 'resize_ms': 0, 'face_ms': 0, 'encode_ms': 0, 'verify_ms': 0}
     input_path = INPUT_DIR / job['input_path']
@@ -309,10 +200,12 @@ def process_job(upsampler, face_enhancer, job, lease_owner):
         completed_tiles += 1
         progress = int(5 + 80 * completed_tiles / (total_tiles * tile_passes))
         if progress > last_progress:
-            update_progress(job['id'], lease_owner, progress)
+            if not update_progress(job['id'], lease_owner, progress):
+                raise RuntimeError('Image job was cancelled')
             last_progress = progress
 
-    update_progress(job['id'], lease_owner, 5)
+    if not update_progress(job['id'], lease_owner, 5):
+        raise RuntimeError('Image job was cancelled')
     upsampler.progress_callback = report_tile_progress
     stage_started = time.perf_counter()
     try:
@@ -329,7 +222,8 @@ def process_job(upsampler, face_enhancer, job, lease_owner):
     metrics['resize_ms'] = (time.perf_counter() - stage_started) * 1000
     if job.get('face_enhance'):
         stage_started = time.perf_counter()
-        update_progress(job['id'], lease_owner, 88)
+        if not update_progress(job['id'], lease_owner, 88):
+            raise RuntimeError('Image job was cancelled')
         output = enhance_faces(output, face_enhancer)
         if output.shape[0:2] != (expected_height, expected_width):
             output = cv2.resize(output, (expected_width, expected_height), interpolation=cv2.INTER_LANCZOS4)
@@ -337,7 +231,8 @@ def process_job(upsampler, face_enhancer, job, lease_owner):
 
     suffix = 'jpg' if job.get('output_format') == 'jpeg' else job.get('output_format', 'png')
     temporary_path = TMP_DIR / f"{job['id']}.{lease_owner}.partial.{suffix}"
-    update_progress(job['id'], lease_owner, 95)
+    if not update_progress(job['id'], lease_owner, 95):
+        raise RuntimeError('Image job was cancelled')
     stage_started = time.perf_counter()
     encode_output(
         temporary_path,

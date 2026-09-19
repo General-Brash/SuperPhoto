@@ -52,7 +52,6 @@ CREATE TABLE IF NOT EXISTS users (
     daily_quota INTEGER NOT NULL DEFAULT 30,
     active_quota INTEGER NOT NULL DEFAULT 10,
     image_quotas TEXT NOT NULL DEFAULT '{"2k":30,"4k":20,"6k":10,"8k":0}',
-    video_quotas TEXT NOT NULL DEFAULT '{"1k":10,"2k":5,"4k":2}',
     disabled INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -70,6 +69,18 @@ CREATE TABLE IF NOT EXISTS sessions (
 
 CREATE INDEX IF NOT EXISTS sessions_user_idx ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS sessions_expiry_idx ON sessions(expires_at);
+
+CREATE TABLE IF NOT EXISTS oidc_identities (
+    id TEXT PRIMARY KEY,
+    issuer TEXT NOT NULL,
+    sub TEXT NOT NULL,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL,
+    last_login_at TEXT,
+    UNIQUE(issuer, sub)
+);
+
+CREATE INDEX IF NOT EXISTS oidc_identities_user_idx ON oidc_identities(user_id);
 
 CREATE TABLE IF NOT EXISTS invites (
     id TEXT PRIMARY KEY,
@@ -164,12 +175,6 @@ JOB_COLUMNS = {
     'deleted_at': 'TEXT',
     'progress': 'INTEGER NOT NULL DEFAULT 0',
     'estimated_seconds': 'INTEGER',
-    'upload_type': "TEXT NOT NULL DEFAULT 'photo'",
-    'duration_seconds': 'REAL',
-    'fps': 'REAL',
-    'frame_count': 'INTEGER',
-    'video_codec': 'TEXT',
-    'audio_codec': 'TEXT',
 }
 
 BATCH_COLUMNS = {
@@ -178,18 +183,18 @@ BATCH_COLUMNS = {
     'expires_at': 'TEXT',
 }
 
-UPLOAD_COLUMNS = {
-    'upload_type': "TEXT NOT NULL DEFAULT 'photo'",
-    'duration_seconds': 'REAL',
-    'fps': 'REAL',
-    'frame_count': 'INTEGER',
-    'video_codec': 'TEXT',
-    'audio_codec': 'TEXT',
-}
+UPLOAD_COLUMNS = {}
 
 USER_COLUMNS = {
     'image_quotas': "TEXT NOT NULL DEFAULT '{\"2k\":30,\"4k\":20,\"6k\":10,\"8k\":0}'",
-    'video_quotas': "TEXT NOT NULL DEFAULT '{\"1k\":10,\"2k\":5,\"4k\":2}'",
+}
+
+# 一次性守卫迁移：移除视频超分相关列（幂等，列存在才删）。
+# SQLite 3.45.1 支持 ALTER TABLE ... DROP COLUMN。
+_DROP_COLUMNS = {
+    'jobs': ('upload_type', 'duration_seconds', 'fps', 'frame_count', 'video_codec', 'audio_codec'),
+    'uploads': ('upload_type', 'duration_seconds', 'fps', 'frame_count', 'video_codec', 'audio_codec'),
+    'users': ('video_quotas',),
 }
 
 
@@ -215,6 +220,7 @@ def init_db():
         _add_columns(connection, 'jobs', JOB_COLUMNS)
         _add_columns(connection, 'uploads', UPLOAD_COLUMNS)
         _add_columns(connection, 'users', USER_COLUMNS)
+        _drop_columns(connection, _DROP_COLUMNS)
         connection.execute(
             '''UPDATE jobs SET estimated_seconds=MAX(1, ROUND(width * height * 12.0 / 1000000))
                WHERE estimated_seconds IS NULL'''
@@ -228,6 +234,14 @@ def _add_columns(connection, table, columns):
     for name, definition in columns.items():
         if name not in existing:
             connection.execute(f'ALTER TABLE {table} ADD COLUMN {name} {definition}')
+
+
+def _drop_columns(connection, table_columns):
+    for table, columns in table_columns.items():
+        existing = {row['name'] for row in connection.execute(f'PRAGMA table_info({table})')}
+        for name in columns:
+            if name in existing:
+                connection.execute(f'ALTER TABLE {table} DROP COLUMN {name}')
 
 
 def _bootstrap_admin(connection):

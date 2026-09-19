@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException, Request, Response
 
-from .config import COOKIE_SECURE, SESSION_COOKIE, SESSION_SECRET, SESSION_TTL_HOURS
+from .config import COOKIE_SECURE, ROLE_ADMIN, SESSION_COOKIE, SESSION_SECRET, SESSION_TTL_HOURS
 from .db import utc_now
 from .security import random_token, token_hash
 
@@ -113,7 +113,7 @@ def require_user(session):
 
 def require_admin(session):
     require_user(session)
-    if session.get('role') != 'admin':
+    if session.get('role') != ROLE_ADMIN:
         raise HTTPException(403, 'Administrator permission required')
     return session
 

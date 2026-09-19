@@ -18,17 +18,14 @@ FACE_DETECTION_MODEL_PATH = MODEL_DIR / 'gfpgan/weights/detection_Resnet50_Final
 FACE_PARSING_MODEL_PATH = MODEL_DIR / 'gfpgan/weights/parsing_parsenet.pth'
 
 MAX_FILE_BYTES = 10 * 1024 * 1024
-VIDEO_MAX_FILE_BYTES = 1024 * 1024 * 1024
 MAX_BATCH_FILES = 10
 MAX_SIDE = 4096
-VIDEO_MAX_WIDTH = 1920
-VIDEO_MAX_HEIGHT = 1080
 MAX_OUTPUT_PIXELS = 64_000_000
 MAX_USER_JOBS = 20
 MAX_GLOBAL_JOBS = 50
 GUEST_DAILY_QUOTA = 3
+GUEST_ACTIVE_QUOTA = 2
 DEFAULT_IMAGE_QUOTAS = {'2k': 30, '4k': 20, '6k': 10, '8k': 0}
-DEFAULT_VIDEO_QUOTAS = {'1k': 10, '2k': 5, '4k': 2}
 
 SESSION_COOKIE = 'superphoto_session'
 SESSION_TTL_HOURS = 24
@@ -44,6 +41,19 @@ TURNSTILE_SITE_KEY = os.getenv('TURNSTILE_SITE_KEY', '')
 TURNSTILE_SECRET_KEY = os.getenv('TURNSTILE_SECRET_KEY', '')
 TURNSTILE_REQUIRED = os.getenv('TURNSTILE_REQUIRED', 'false').lower() in ('1', 'true', 'yes')
 COOKIE_SECURE = os.getenv('SUPERPHOTO_COOKIE_SECURE', 'true').lower() in ('1', 'true', 'yes')
+
+# OIDC / OAuth2：SuperPhoto 作为被认证方(RP)，认证方为 Personal_Sub2。
+OIDC_ISSUER = os.getenv('OIDC_ISSUER', '')
+OIDC_DISCOVERY_URL = os.getenv('OIDC_DISCOVERY_URL', '')
+OIDC_CLIENT_ID = os.getenv('OIDC_CLIENT_ID', '')
+OIDC_CLIENT_SECRET = os.getenv('OIDC_CLIENT_SECRET', '')
+OIDC_REDIRECT_URI = os.getenv('OIDC_REDIRECT_URI', '')
+OIDC_SCOPES = os.getenv('OIDC_SCOPES', 'openid profile')
+# 缺失任一关键项时，即便 OIDC_ENABLED=true 也视为关闭（fail-closed）。
+OIDC_ENABLED = (
+    os.getenv('OIDC_ENABLED', 'false').lower() in ('1', 'true', 'yes')
+    and bool(OIDC_CLIENT_ID and OIDC_CLIENT_SECRET and OIDC_REDIRECT_URI and (OIDC_ISSUER or OIDC_DISCOVERY_URL))
+)
 
 ROLE_GUEST = 'guest'
 ROLE_USER = 'user'
@@ -67,15 +77,9 @@ MODEL_REGISTRY = {
 SAFE_TILES = {128, 256, 512}
 ADMIN_TILES = {64, 128, 192, 256, 384, 512, 768, 1024}
 OUTPUT_FORMATS = {'png', 'jpeg', 'webp'}
-VIDEO_OUTPUT_FORMATS = {'mp4', 'webm'}
-VIDEO_INPUT_EXTENSIONS = {'.mp4', '.mov', '.mkv', '.webm', '.m4v', '.avi', '.flv'}
-VIDEO_INPUT_CODECS = {'h264', 'hevc', 'vp8', 'vp9', 'av1', 'mpeg4'}
 QUALITY_PRESETS = {'standard', 'high', 'maximum'}
 TARGET_RESOLUTIONS = {'2k', '4k', '6k', '8k'}
-VIDEO_TARGET_RESOLUTIONS = {'1k', '2k', '4k'}
 ASPECT_RATIOS = {'original', '16:9', '9:16', '4:3', '3:4', '1:1'}
-FFMPEG_BIN = os.getenv('FFMPEG_BIN', 'ffmpeg')
-FFPROBE_BIN = os.getenv('FFPROBE_BIN', 'ffprobe')
 
 
 def face_models_available():
