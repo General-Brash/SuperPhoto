@@ -88,7 +88,7 @@ from app.common.security import hash_password, random_token, token_hash, verify_
 from app.common import oidc as oidc_lib
 
 
-app = FastAPI(title='SuperPhoto API', version='1.0.4', docs_url=None, redoc_url=None, openapi_url=None)
+app = FastAPI(title='SuperPhoto API', version='1.1.0', docs_url=None, redoc_url=None, openapi_url=None)
 Image.MAX_IMAGE_PIXELS = MAX_SIDE * MAX_SIDE
 USERNAME_PATTERN = re.compile(r'^[A-Za-z0-9_]{3,24}$')
 _rate_buckets = defaultdict(deque)

@@ -1,9 +1,9 @@
 import argparse
-from pathlib import Path
-
 import openvino as ov
 import torch
 from basicsr.archs.rrdbnet_arch import RRDBNet
+from pathlib import Path
+
 from realesrgan.archs.srvgg_arch import SRVGGNetCompact
 
 

@@ -1,5 +1,4 @@
 import argparse
-
 import numpy as np
 import openvino as ov
 import torch
@@ -31,7 +30,11 @@ def main():
     compiled = core.compile_model(
         args.model,
         'CPU',
-        {'INFERENCE_NUM_THREADS': '4', 'NUM_STREAMS': '1', 'PERFORMANCE_HINT': 'LATENCY'},
+        {
+            'INFERENCE_NUM_THREADS': '4',
+            'NUM_STREAMS': '1',
+            'PERFORMANCE_HINT': 'LATENCY'
+        },
     )
     output_port = compiled.output(0)
 
@@ -42,10 +45,8 @@ def main():
             torch_output = model(input_tensor).numpy()
         openvino_output = compiled([input_tensor.numpy()])[output_port]
         difference = np.abs(torch_output - openvino_output)
-        print(
-            f'size={size} mean_abs={difference.mean():.8g} '
-            f'max_abs={difference.max():.8g}'
-        )
+        print(f'size={size} mean_abs={difference.mean():.8g} '
+              f'max_abs={difference.max():.8g}')
 
 
 if __name__ == '__main__':
