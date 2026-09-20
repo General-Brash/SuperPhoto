@@ -1,0 +1,59 @@
+name: Publish container image
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Git ref to build
+        required: true
+        default: v1.1.0
+      image_tag:
+        description: Container tag to publish
+        required: true
+        default: v1.1.0
+      publish_latest:
+        description: Also move the latest tag
+        required: true
+        type: boolean
+        default: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set image tags
+        id: tags
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo 'tags<<EOF'
+            echo "ghcr.io/${GITHUB_REPOSITORY,,}:${{ inputs.image_tag }}"
+            if [[ '${{ inputs.publish_latest }}' == 'true' ]]; then
+              echo "ghcr.io/${GITHUB_REPOSITORY,,}:latest"
+            fi
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
